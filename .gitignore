@@ -1,0 +1,6 @@
+build*/
+.DS_Store
+reference/
+shots/
+shots-space/
+build-config.log
