@@ -36,10 +36,11 @@ private:
 
     Processor& proc;
     int page = 0;
-    static constexpr int kPages = 7;
+    static constexpr int kPages = 8;
     static constexpr int kLab = 6;   // the lab page (the training, measured)
-    /** the tabs, in order: the space page only in Neurosonde Space */
-    static std::vector<int> tabOrder() { std::vector<int> t { 0, 1, 2, 3, 4 }; if (NS_SPATIAL) t.push_back (5); t.push_back (kLab); return t; }
+    static constexpr int kGain = 7;  // gain staging: meters at every stage, the limiter
+    /** the tabs, in order: gain after synthesis; the space page only in Neurosonde Space */
+    static std::vector<int> tabOrder() { std::vector<int> t { 0, 1, 2, kGain, 3, 4 }; if (NS_SPATIAL) t.push_back (5); t.push_back (kLab); return t; }
     std::vector<juce::Component*> pages[kPages];
     std::vector<std::unique_ptr<juce::Component>> owned;
     juce::Rectangle<int> tabArea[kPages];
@@ -59,6 +60,9 @@ private:
     struct JournalList; JournalList* journalList = nullptr;
     // corpus page
     struct JobList; JobList* jobList = nullptr; juce::Component* offlineView = nullptr;
+    // gain page
+    struct GainView; GainView* gainView = nullptr;
+    float outHold = -120; int outHoldAge = 0;
     // space page (Neurosonde Space)
     ui::SphereView* sphere = nullptr; ui::Goniometer* gonio = nullptr; ui::SpatialFeatures* spatFeat = nullptr;
     bool dragOver = false, built = false;

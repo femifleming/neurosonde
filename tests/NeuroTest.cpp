@@ -1,11 +1,11 @@
 // NeuroTest: instantiate the processor like a host would, play into it, check the output, and screenshot every page.
 //   NeuroTest [--shots dir]
 #include "../Source/Editor.h"
+#include "TestDir.h"
 #include <iostream>
 int main (int argc, char** argv)
 {
-    ::setenv ("NEUROSONDE_BRAIN_DIR", "/private/tmp/neurosonde_test_brain", 1);   // never train the user's real brain
-    juce::File ("/private/tmp/neurosonde_test_brain").deleteRecursively();
+    setEnv ("NEUROSONDE_BRAIN_DIR", testDir ("neurosonde_test_brain"));   // never train the user's real brain
     juce::ScopedJuceInitialiser_GUI gui;
     juce::File shots;
     for (int i = 1; i < argc; ++i) if (juce::String (argv[i]) == "--shots" && i + 1 < argc) shots = juce::File::getCurrentWorkingDirectory().getChildFile (argv[++i]);
@@ -112,7 +112,7 @@ int main (int argc, char** argv)
     }
     // ---- offline learning: train on files in epochs, frozen while playing
     {
-        auto dir = juce::File ("/private/tmp/neurosonde_test_files"); dir.deleteRecursively(); dir.createDirectory();
+        auto dir = juce::File (juce::String (testDir ("neurosonde_test_files"))); dir.deleteRecursively(); dir.createDirectory();
         juce::WavAudioFormat wav;
         for (int f = 0; f < 3; ++f)
         {
@@ -180,7 +180,7 @@ int main (int argc, char** argv)
             }
         });
         // meanwhile: notes changing, a memory saved, files fed and an offline training run
-        auto dir = juce::File ("/private/tmp/neurosonde_stress_files"); dir.deleteRecursively(); dir.createDirectory();
+        auto dir = juce::File (juce::String (testDir ("neurosonde_stress_files"))); dir.deleteRecursively(); dir.createDirectory();
         { juce::WavAudioFormat wav; auto file = dir.getChildFile ("a.wav"); std::unique_ptr<juce::AudioFormatWriter> w (wav.createWriterFor (file.createOutputStream().release(), 48000, 2, 24, {}, 0));
           juce::AudioBuffer<float> fb (2, 48000 * 8); for (int i = 0; i < fb.getNumSamples(); ++i) { const float x = 0.3f * std::sin (i * 0.02f); fb.setSample (0, i, x); fb.setSample (1, i, 0.5f * x); } w->writeFromAudioSampleBuffer (fb, 0, fb.getNumSamples()); }
         many[1]->setNotes ("rain on glass, slow"); many[2]->addFiles ({ dir.getChildFile ("a.wav").getFullPathName() }, false);
@@ -218,7 +218,7 @@ int main (int argc, char** argv)
         ns::Editor ed (*proc);
         ed.setVisible (true);   // (hit tests only answer for visible components)
         bool ok = true;
-        for (int pg : { 0, 1, 2, 3, 4, 5, 6 })
+        for (int pg : { 0, 1, 2, 3, 4, 5, 6, 7 })
         {
             if (pg == 5 && ! NS_SPATIAL) continue;
             ed.setPage (pg);
@@ -236,7 +236,7 @@ int main (int argc, char** argv)
     if (shots != juce::File())
     {
         shots.createDirectory();
-        for (int pg : { 0, 1, 2, 3, 4, 5, 6 })
+        for (int pg : { 0, 1, 2, 3, 4, 5, 6, 7 })
         {
             if (pg == 5 && ! NS_SPATIAL) continue;
             const auto f = shots.getChildFile ("page" + juce::String (pg) + ".png");

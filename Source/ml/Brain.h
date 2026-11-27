@@ -21,13 +21,56 @@
 #include <set>
 #include <numeric>
 #include <sstream>
-#include <sys/stat.h>
-#include <sys/file.h>
-#include <fcntl.h>
-#include <unistd.h>
+#include <filesystem>
+#if defined(_WIN32)
+ // the C runtime's file locking: no <windows.h> in a header everything includes (its macros, near, far, IN, OUT,
+ // small ..., break ordinary code)
+ #include <io.h>
+ #include <fcntl.h>
+ #include <share.h>
+ #include <sys/locking.h>
+ #include <sys/stat.h>
+#else
+ #include <sys/file.h>
+ #include <fcntl.h>
+ #include <unistd.h>
+#endif
 
 namespace ns::ml
 {
+/** a path from a UTF-8 string (on Windows a narrow string would be read in the ANSI code page) */
+inline std::filesystem::path fsPath (const std::string& s)
+{
+   #if defined(_WIN32)
+    return std::filesystem::path (std::u8string (s.begin(), s.end()));
+   #else
+    return std::filesystem::path (s);
+   #endif
+}
+
+/** an exclusive lock on a file, held for its lifetime (flock on the Mac and Linux, LockFileEx on Windows): the
+    brain file is merged by every process that uses it */
+struct FileLock
+{
+   #if defined(_WIN32)
+    int fd = -1; bool locked = false;
+    explicit FileLock (const std::string& path)
+    {
+        if (_wsopen_s (&fd, fsPath (path).wstring().c_str(), _O_CREAT | _O_RDWR | _O_BINARY, _SH_DENYNO, _S_IREAD | _S_IWRITE) != 0) { fd = -1; return; }
+        // _LK_LOCK retries for about 10 s before it gives up; keep trying (another process holds the brain)
+        for (int k = 0; k < 30 && ! locked; ++k) { _lseek (fd, 0, SEEK_SET); locked = _locking (fd, _LK_LOCK, 1) == 0; }
+    }
+    ~FileLock() { if (fd >= 0) { if (locked) { _lseek (fd, 0, SEEK_SET); _locking (fd, _LK_UNLCK, 1); } _close (fd); } }
+    bool ok() const { return fd >= 0 && locked; }
+   #else
+    int fd = -1;
+    explicit FileLock (const std::string& path) { fd = ::open (path.c_str(), O_CREAT | O_RDWR, 0644); if (fd >= 0) ::flock (fd, LOCK_EX); }
+    ~FileLock() { if (fd >= 0) { ::flock (fd, LOCK_UN); ::close (fd); } }
+    bool ok() const { return fd >= 0; }
+   #endif
+    FileLock (const FileLock&) = delete; FileLock& operator= (const FileLock&) = delete;
+};
+
 /** single-producer single-consumer ring (wait-free on both sides) */
 template <typename T, size_t Cap>
 struct SpscRing
@@ -157,7 +200,7 @@ public:
     std::vector<Memory> memories() const
     {
         std::vector<Memory> out;
-        std::ifstream idx (dir + "/memories/index.txt");
+        std::ifstream idx (fsPath (dir + "/memories/index.txt"));
         std::string line;
         while (std::getline (idx, line))
         {
@@ -181,7 +224,7 @@ public:
         const std::string name = "m" + std::to_string (t) + "_" + std::to_string (vaeSteps) + ".nsb";
         mkdirs (dir + "/memories");
         save (dir + "/memories/" + name);
-        std::ofstream idx (dir + "/memories/index.txt", std::ios::app);
+        std::ofstream idx (fsPath (dir + "/memories/index.txt"), std::ios::app);
         std::string clean = label; for (auto& c : clean) if (c == '\t' || c == '\n') c = ' ';
         idx << name << '\t' << vaeSteps << '\t' << t << '\t' << clean << '\n';
     }
@@ -918,7 +961,7 @@ private:
     {
         const std::string tmp = path + ".tmp";
         {
-            std::ofstream o (tmp, std::ios::binary);
+            std::ofstream o (fsPath (tmp), std::ios::binary);
             if (! o) return false;
             const uint32_t h[3] = { kMagic, kVersion, archHash() };
             o.write ((const char*) h, sizeof (h));
@@ -930,11 +973,13 @@ private:
             o.flush();
             if (! o) return false;
         }
-        return std::rename (tmp.c_str(), path.c_str()) == 0;
+        // replaces the old file in one step (std::rename can't replace an existing file on Windows)
+        std::error_code ec; std::filesystem::rename (fsPath (tmp), fsPath (path), ec);
+        return ! ec;
     }
     bool readBlob (const std::string& path, Blob& b)
     {
-        std::ifstream i (path, std::ios::binary);
+        std::ifstream i (fsPath (path), std::ios::binary);
         if (! i) return false;
         uint32_t h[3] {}; i.read ((char*) h, sizeof (h));
         if (h[0] != kMagic || h[1] != kVersion || h[2] != archHash()) return false;
@@ -959,9 +1004,7 @@ private:
     void save (const std::string& path) { Blob b; toBlob (b); writeBlob (path, b); }
     static void mkdirs (const std::string& p)
     {
-        std::string cur;
-        for (size_t i = 0; i < p.size(); ++i) { cur += p[i]; if (p[i] == '/' && i > 0) ::mkdir (cur.c_str(), 0755); }
-        ::mkdir (p.c_str(), 0755);
+        std::error_code ec; std::filesystem::create_directories (fsPath (p), ec);
     }
 
 public:
@@ -971,9 +1014,8 @@ public:
         std::lock_guard<std::mutex> lk (modelLock);
         mkdirs (dir);
         const std::string path = dir + "/brain.nsb";
-        const int fd = ::open ((dir + "/brain.lock").c_str(), O_CREAT | O_RDWR, 0644);
-        if (fd < 0) return;
-        ::flock (fd, LOCK_EX);
+        FileLock lock (dir + "/brain.lock");
+        if (! lock.ok()) return;
         Blob mine; toBlob (mine);
         Blob file;
         const bool haveFile = ! forceOverwrite && readBlob (path, file);
@@ -1015,7 +1057,6 @@ public:
             base = mine;
         }
         baseValid = true; forceOverwrite = false;
-        ::flock (fd, LOCK_UN); ::close (fd);
     }
 
 private:

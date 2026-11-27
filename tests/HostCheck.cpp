@@ -8,6 +8,7 @@
 //   bounded, no memory growth, no CPU creep).
 //   HostCheck [--soak seconds] [--only vst3|au] [--plugin name]
 #include <juce_audio_processors/juce_audio_processors.h>
+#include "TestDir.h"
 #include <juce_audio_utils/juce_audio_utils.h>
 #include <iostream>
 #include <mach/mach.h>
@@ -111,7 +112,7 @@ static void runSuite (juce::AudioPluginFormatManager& fm, const juce::PluginDesc
                 ++runs;
             }
         check (s.finite, juce::String (runs) + " rate/block combinations x 7 signals (silence, music, DC, square, impulses, denormal, noise): all output finite");
-        check (s.peak < 4.0, "output bounded (peak " + juce::String (s.peak, 2) + ")");
+        check (s.peak <= 1.0f, "output never above 0 dBFS (peak " + juce::String (s.peak, 2) + ")");
         check (shape, "buffers left intact");
     }
 
@@ -120,7 +121,7 @@ static void runSuite (juce::AudioPluginFormatManager& fm, const juce::PluginDesc
         p->releaseResources(); p->prepareToPlay (48000, 1024);
         juce::AudioBuffer<float> b (chans (*p), 1024); juce::MidiBuffer m; Stats s; int64_t pos = 0;
         for (int k = 0; k < 600; ++k) { const int n = 1 + rnd.nextInt (1024); juce::AudioBuffer<float> v (b.getArrayOfWritePointers(), b.getNumChannels(), n); fill (v, 1, pos, rnd); p->processBlock (v, m); s.take (v, 2); }
-        check (s.finite && s.peak < 4, "600 random block sizes 1..1024: finite, peak " + juce::String (s.peak, 2));
+        check (s.finite && s.peak <= 1.0f, "600 random block sizes 1..1024: finite, peak " + juce::String (s.peak, 2));
     }
 
     // ---- parameter automation: every parameter random every block, and slow ramps
@@ -134,7 +135,7 @@ static void runSuite (juce::AudioPluginFormatManager& fm, const juce::PluginDesc
             else for (int q = 0; q < params.size(); ++q) params[q]->setValueNotifyingHost (0.5f + 0.5f * std::sin (k * 0.01f + q));
             fill (b, 1 + (k / 100) % 6, pos, rnd); p->processBlock (b, m); s.take (b, 2);
         }
-        check (s.finite && s.peak < 4, "1500 blocks of random + ramped automation on all parameters: finite, peak " + juce::String (s.peak, 2));
+        check (s.finite && s.peak <= 1.0f, "1500 blocks of random + ramped automation on all parameters: finite, peak " + juce::String (s.peak, 2));
         for (auto* prm : params) prm->setValueNotifyingHost (prm->getDefaultValue());
     }
 
@@ -255,7 +256,7 @@ static void runSuite (juce::AudioPluginFormatManager& fm, const juce::PluginDesc
             s.take (b, 2);
         }
         const double grow = (double) residentBytes() - (double) memStart;
-        check (s.finite && s.peak < 4, "soak: " + juce::String (soakSeconds / 60.0, 1) + " min of audio with parameter changes, finite, peak " + juce::String (s.peak, 2));
+        check (s.finite && s.peak <= 1.0f, "soak: " + juce::String (soakSeconds / 60.0, 1) + " min of audio with parameter changes, finite, peak " + juce::String (s.peak, 2));
         check (grow < 64.0 * 1024 * 1024, "soak: memory after warm-up grew " + juce::String (grow / 1048576.0, 1) + " MB");
         check (cpuLast < cpuFirst * 1.6 + 5, "soak: no cpu creep (last tenth " + juce::String (cpuLast / window, 2) + " ms/block vs " + juce::String (cpuFirst / window, 2) + ")");
     }
@@ -264,8 +265,7 @@ static void runSuite (juce::AudioPluginFormatManager& fm, const juce::PluginDesc
 
 int main (int argc, char** argv)
 {
-    ::setenv ("NEUROSONDE_BRAIN_DIR", "/private/tmp/neurosonde_hostcheck_brain", 1);   // never the user's real brain
-    juce::File ("/private/tmp/neurosonde_hostcheck_brain").deleteRecursively();
+    setEnv ("NEUROSONDE_BRAIN_DIR", testDir ("neurosonde_hostcheck_brain"));   // never the user's real brain
     juce::ScopedJuceInitialiser_GUI gui;
     double soak = 0; juce::String only, name;
     for (int i = 1; i < argc; ++i)
@@ -321,6 +321,6 @@ int main (int argc, char** argv)
     check (found.size() >= (only.isEmpty() ? 4u : 2u), "found the installed plug-ins: " + juce::String ((int) found.size()));
     for (auto& d : found) runSuite (fm, d, soak);
     std::cout << "\n" << checks << " checks, " << (fails ? juce::String (fails) + " FAILED" : juce::String ("all passed")) << std::endl;
-    juce::File ("/private/tmp/neurosonde_hostcheck_brain").deleteRecursively();
+    testDir ("neurosonde_hostcheck_brain");
     return fails ? 1 : 0;
 }

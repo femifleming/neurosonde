@@ -3,7 +3,7 @@
 namespace ns
 {
 using namespace ns::ui;
-static const char* kPageNames[] = { "constellation", "network", "synthesis", "patch notes", "corpus", "space", "lab" };
+static const char* kPageNames[] = { "constellation", "network", "synthesis", "patch notes", "corpus", "space", "lab", "gain" };
 
 static juce::String noteName (float hz)
 {
@@ -337,6 +337,104 @@ struct Editor::AxesView : juce::Component
     Processor& proc;
 };
 
+/** gain staging: the signal's level at every stage, left to right (input, the four layers, the synthesis after the
+    output gain, what reaches the limiter, the output), each a vertical meter from -60 to +6 dBFS with its peak
+    held, the 0 dBFS line and the ceiling (dashed); the limiter's gain reduction hangs from the top. Click: reset the
+    overs and the held peaks. */
+struct Editor::GainView : juce::Component
+{
+    explicit GainView (Processor& p) : proc (p) {}
+    static constexpr int kM = 8;
+    float hold[kM] { -120, -120, -120, -120, -120, -120, -120, -120 }; int age[kM] {};
+    float grHold = 0; int grAge = 0;
+    void mouseDown (const juce::MouseEvent&) override
+    {
+        proc.instance().resetOvers();
+        for (auto& h : hold) h = -120; grHold = 0; repaint();
+    }
+    static float yOf (float db, juce::Rectangle<float> r) { const float u = juce::jlimit (0.0f, 1.0f, (db + 60.0f) / 66.0f); return r.getBottom() - u * r.getHeight(); }
+    void paint (juce::Graphics& g) override
+    {
+        const auto t = proc.instance().telemetry();
+        const float now[kM] = { t.gInPeak, t.gLayerPeak[0], t.gLayerPeak[1], t.gLayerPeak[2], t.gLayerPeak[3], t.gWetPeak, t.gPreLimPeak, t.gOutPeak };
+        const char* names[kM] = { "input", "layer 1", "layer 2", "layer 3", "layer 4", "synthesis", "to limiter", "output" };
+        for (int k = 0; k < kM; ++k) { if (now[k] >= hold[k]) { hold[k] = now[k]; age[k] = 0; } else if (++age[k] > 30) hold[k] = std::max (-120.0f, hold[k] - 0.6f); }
+        if (t.gReduction >= grHold) { grHold = t.gReduction; grAge = 0; } else if (++grAge > 30) grHold = std::max (0.0f, grHold - 0.3f);
+
+        auto r = getLocalBounds().toFloat();
+        auto info = r.removeFromBottom (92);
+        auto labels = r.removeFromBottom (44);
+        auto scale = r.removeFromLeft (44);
+        r.removeFromRight (44);
+        const auto m = r.reduced (0, 10);
+        // the scale: every 6 dB, 0 dBFS and the ceiling across every meter
+        g.setFont (mono (10));
+        for (int db = 6; db >= -60; db -= 6)
+        {
+            const float y = yOf ((float) db, m);
+            g.setColour (juce::Colours::white.withAlpha (db == 0 ? 0.55f : 0.12f));
+            g.fillRect (m.getX(), y, m.getWidth(), db == 0 ? 1.0f : 0.5f);
+            g.setColour (db == 0 ? C::text : C::muted);
+            g.drawText (juce::String (db), scale.withY (y - 7).withHeight (14).reduced (2, 0), juce::Justification::centredRight);
+        }
+        {
+            const float y = yOf (t.gCeilingDb, m);
+            for (float x = m.getX(); x < m.getRight(); x += 8) { g.setColour (juce::Colours::white.withAlpha (0.8f)); g.fillRect (x, y, 4.0f, 1.0f); }
+            g.setColour (C::text2); g.drawText ("ceiling " + juce::String (t.gCeilingDb, 1) + " dbfs", juce::Rectangle<float> (m.getRight() - 160, y - 17, 160, 14), juce::Justification::centredRight);
+        }
+        const float cw = m.getWidth() / kM;
+        for (int k = 0; k < kM; ++k)
+        {
+            auto col = juce::Rectangle<float> (m.getX() + k * cw, m.getY(), cw, m.getHeight());
+            auto bar = col.withSizeKeepingCentre (std::min (22.0f, cw * 0.4f), col.getHeight());
+            const bool live = k < 1 || k > 4 || now[k] > -119;
+            g.setColour (juce::Colours::white.withAlpha (0.08f)); g.fillRect (bar);
+            g.setColour (juce::Colours::white.withAlpha (0.25f)); g.drawRect (bar, 0.5f);
+            if (live && now[k] > -60)
+            {
+                // cells of 1.5 dB, lit up to the peak: brighter above -18, full white above -6
+                for (float db = -60; db < now[k] && db < 6; db += 1.5f)
+                {
+                    const float y0 = yOf (db + 1.5f, m), y1 = yOf (db, m);
+                    g.setColour (juce::Colours::white.withAlpha (db >= -6 ? 1.0f : db >= -18 ? 0.75f : 0.45f));
+                    g.fillRect (bar.getX() + 2, y0 + 1, bar.getWidth() - 4, std::max (1.0f, y1 - y0 - 1));
+                }
+            }
+            if (live && hold[k] > -60) { g.setColour (juce::Colours::white); g.fillRect (bar.getX() - 3, yOf (hold[k], m) - 1, bar.getWidth() + 6, 2.0f); }
+            // labels: name, held peak
+            auto lb = labels.withX (col.getX()).withWidth (cw);
+            g.setFont (font (11.5f)); g.setColour (k == kM - 1 ? C::text : C::text2);
+            g.drawText (names[k], lb.removeFromTop (20), juce::Justification::centred);
+            g.setFont (mono (11)); g.setColour (hold[k] > 0 ? juce::Colours::white : C::text);
+            g.drawText (live ? (hold[k] > -100 ? juce::String (hold[k], 1) : juce::String ("-inf")) : juce::String ("off"), lb, juce::Justification::centredTop);
+            if (k == 0 || k == 4 || k == 6) { g.setColour (juce::Colours::white.withAlpha (0.18f)); g.fillRect (col.getRight(), m.getY(), 1.0f, m.getHeight()); }
+        }
+        // gain reduction: hangs from the top of the output meter, 0 to 24 dB
+        {
+            auto col = juce::Rectangle<float> (m.getX() + (kM - 1) * cw, m.getY(), cw, m.getHeight());
+            auto gr = col.withTrimmedLeft (col.getWidth() * 0.78f).withWidth (6);
+            const float h = juce::jlimit (0.0f, 1.0f, t.gReduction / 24.0f) * m.getHeight() * 0.5f;
+            g.setColour (juce::Colours::white.withAlpha (0.2f)); g.drawRect (gr.withHeight (m.getHeight() * 0.5f), 0.5f);
+            g.setColour (juce::Colours::white); g.fillRect (gr.withHeight (h));
+        }
+        // the read-out
+        static const char* modes[] = { "clean", "soft" };
+        const float headroom = t.gCeilingDb - hold[kM - 1];
+        const double ms = 1000.0 * t.gLatency / std::max (1.0, proc.getSampleRate());
+        g.setFont (mono (11.5f));
+        auto line = [&] (const juce::String& s, bool bright = false) { g.setColour (bright ? juce::Colours::white : C::text2); g.drawText (s, info.removeFromTop (20).reduced (8, 0), juce::Justification::centredLeft); };
+        line ("limiter " + juce::String (modes[juce::jlimit (0, 1, t.gLimiter)]) + "   ceiling " + juce::String (t.gCeilingDb, 1) + " dbfs   look-ahead "
+              + juce::String (t.gLatency) + " samples (" + juce::String (ms, 2) + " ms)   gain reduction " + juce::String (std::max (0.0f, grHold) + 0.0f, 1) + " db");
+        line ("output peak " + (hold[kM - 1] > -100 ? juce::String (hold[kM - 1], 1) : juce::String ("-inf")) + " dbfs   headroom "
+              + (hold[kM - 1] > -100 ? juce::String (headroom, 1) : juce::String ("-")) + " db   output rms " + juce::String (t.gOutRms, 1)
+              + " dbfs   input rms " + juce::String (t.gInRms, 1) + " dbfs   auto gain " + juce::String (t.gAutoDb, 1) + " db");
+        line ("overs before the limiter " + juce::String ((juce::int64) t.gOvers) + "   overs at the output (above 0 dbfs) " + juce::String ((juce::int64) t.gOutOvers)
+              + (t.gOutOvers == 0 ? juce::String ("   -   not clipping") : juce::String ("   -   CLIPPING")), true);
+        line ("click to reset the held peaks and the overs");
+    }
+    Processor& proc;
+};
+
 struct Editor::JournalList : juce::Component
 {
     explicit JournalList (Processor& p) : proc (p) { refresh(); }
@@ -559,6 +657,19 @@ Editor::Editor (Processor& p) : juce::AudioProcessorEditor (p), proc (p)
         spatFeat = make<ui::SpatialFeatures> (pg, proc);
     }
 #endif
+    // ---- gain staging: input · layers | the meters | output · limiter
+    {
+        auto& pg = pages[kGain];
+        make<ParamBar> (pg, P ("ingain"));
+        for (int k = 0; k < Synth::kLayers; ++k) make<ParamBar> (pg, P (Processor::lid (k, "level")), "layer " + juce::String (k + 1) + " level");
+        make<ParamToggle> (pg, P ("match"), "match engine levels");
+        gainView = make<GainView> (pg, proc);
+        make<ParamBar> (pg, P ("out"));
+        make<ParamBar> (pg, P ("mix"));
+        make<ParamBar> (pg, P ("ceiling"));
+        make<ChoiceRow> (pg, P ("limiter"), "limiter");
+        make<ParamToggle> (pg, P ("autogain"), "auto gain");
+    }
     // ---- lab: the training, measured
     {
         auto& pg = pages[kLab];
@@ -701,6 +812,23 @@ void Editor::resized()
         panels[2][5] = col[3]; panelTitle[2][5] = juce::String::fromUTF8 ("input · output");
         a = col[3].reduced (8, 0).withTrimmedTop (30);
         for (int k = 0; k < 5; ++k) place (v, i, a, 38, 2);
+    }
+    // gain: input · layers | the meters | output · limiter (mirror-symmetric, the same side width as the other pages)
+    {
+        auto& v = pages[kGain]; size_t i = 0; auto b = body;
+        auto left = b.removeFromLeft (side); b.removeFromLeft (10);
+        auto right = b.removeFromRight (side); b.removeFromRight (10);
+        panels[kGain][0] = left; panelTitle[kGain][0] = juce::String::fromUTF8 ("input · layers");
+        auto a = left.reduced (8, 0).withTrimmedTop (30);
+        for (int k = 0; k < 5; ++k) place (v, i, a, 40, 6);
+        a.removeFromTop (4); { auto tg = a.removeFromTop (28); v[i++]->setBounds (tg.removeFromLeft (190)); }
+        panels[kGain][1] = b; panelTitle[kGain][1] = "gain staging";
+        v[i++]->setBounds (b.reduced (14, 0).withTrimmedTop (34).withTrimmedBottom (8));
+        panels[kGain][2] = right; panelTitle[kGain][2] = juce::String::fromUTF8 ("output · limiter");
+        a = right.reduced (8, 0).withTrimmedTop (30);
+        for (int k = 0; k < 3; ++k) place (v, i, a, 40, 6);
+        place (v, i, a, 24, 10);
+        auto tg = a.removeFromTop (28); v[i++]->setBounds (tg.removeFromLeft (190));
     }
     // notes: what the notes say | the notes | journal
     {
@@ -875,8 +1003,15 @@ void Editor::paintOverChildren (juce::Graphics& g)
     g.drawText ("recon " + juce::String (st.recon.load(), 4) + "   kl " + juce::String (st.kl.load(), 3) + "   lr " + juce::String (st.lr.load(), 5)
                 + "   nll " + juce::String (st.gruNll.load(), 3) + "   replay " + juce::String (st.replaySize.load()) + "   surprise " + juce::String ((int) (t.surprise * 100))
                 + "%   in " + juce::String ((int) t.inLoud) + " db   f0 " + juce::String ((int) t.f0) + " hz   " + noteName (t.f0), f.reduced (12, 0), juce::Justification::centredLeft);
+    // on every page: the output peak (held), and whether anything clipped (the gain page has the whole chain)
+    const juce::String outS = "out " + (outHold > -100 ? juce::String (outHold, 1) : juce::String ("-inf")) + " dbfs"
+                            + (t.gReduction > 0.05f ? "   limiting " + juce::String (t.gReduction, 1) + " db" : juce::String())
+                            + (t.gOutOvers > 0 ? juce::String ("   CLIPPED ") + juce::String ((juce::int64) t.gOutOvers) : juce::String ("   no clipping"));
+    g.setColour (t.gOutOvers > 0 ? juce::Colours::white : C::text2);
+    g.drawText (outS, f.reduced (12, 0), juce::Justification::centredRight);
+    g.setColour (C::muted);
     g.drawText (juce::String (proc.brain().folder()).replace (juce::File::getSpecialLocation (juce::File::userHomeDirectory).getFullPathName(), "~"),
-                f.reduced (12, 0), juce::Justification::centredRight);
+                f.reduced (12, 0).withTrimmedRight ((int) textWidth (mono (9.5f), outS) + 24), juce::Justification::centredRight);
 
     // "stargate jump" after recalling a memory
     if (memories && memories->jumped > 0.01f)
@@ -913,6 +1048,10 @@ void Editor::timerCallback()
     if (page == 4) { jobList->repaint(); offlineView->repaint(); }
     if (page == 5 && sphere) { sphere->repaint(); gonio->repaint(); spatFeat->repaint(); }
     if (page == kLab) for (auto* c : pages[kLab]) c->repaint();
+    if (page == kGain) gainView->repaint();
+    // the output peak, held, for the footer on every page
+    if (t.gOutPeak >= outHold) { outHold = t.gOutPeak; outHoldAge = 0; } else if (++outHoldAge > 30) outHold = std::max (-120.0f, outHold - 0.6f);
+    repaint (getLocalBounds().removeFromBottom (22));
     if (memories->jumped > 0) { memories->jumped = std::max (0.0f, memories->jumped - 0.05f); repaint(); }
     if (page != 0) space->repaint();
 }

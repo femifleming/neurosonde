@@ -57,6 +57,11 @@ APVTS::ParameterLayout Processor::layout()
     f ("ingain", "input gain", -24, 24, 0, 1, "db");
     f ("mix", "dry / wet", 0, 1, 1);
     f ("out", "output", -36, 12, 0, 1, "db");
+    // gain staging: the limiter keeps every sample under the ceiling (clean: transparent; soft: saturates into it first)
+    f ("ceiling", "ceiling", -12, 0, -1, 1, "db");
+    c ("limiter", "limiter", { "clean", "soft" }, 0);   // always on: nothing leaves above the ceiling
+    b ("autogain", "auto gain", false);
+    b ("match", "match engine levels", true);
     f ("transpose", "transpose", -24, 24, 0, 1, "st");
     c ("pitchsrc", "pitch source", { "input", "network" }, 0);
     f ("grainsize", "grain size", 10, 1000, 120, 0.4f, "ms");
@@ -140,6 +145,7 @@ void Processor::prepareToPlay (double sr, int block)
 {
     sampleRate = sr;
     inst->prepare (sr, std::max (block, 512));
+    setLatencySamples (inst->latencySamples());   // the output limiter's look-ahead
     silentIn.setSize (2, std::max (block, 8192)); spareSc.setSize (2, std::max (block, 8192));
     silentZero.setSize (1, std::max (block, 8192)); silentZero.clear();
 
@@ -159,7 +165,7 @@ void Processor::readParams (Params& p) const
     p.lucid = v ("lucid"); p.temperature = v ("temp"); p.drift = v ("drift"); p.dreamEngine = (int) v ("dream");
     p.gravity = v ("gravity"); p.probeX = v ("probex"); p.probeY = v ("probey"); p.route = v ("route") > 0.5f; p.routeSpeed = v ("routespeed");
     p.learn = (int) v ("learnmode") == 0; p.listen = v ("listen") > 0.5f; p.gateDb = v ("gate"); p.inGainDb = v ("ingain");
-    p.mix = v ("mix"); p.outDb = v ("out"); p.transpose = v ("transpose"); p.pitchSource = (int) v ("pitchsrc"); p.keysOnly = false;
+    p.mix = v ("mix"); p.outDb = v ("out"); p.ceilingDb = v ("ceiling"); p.limiter = (int) v ("limiter"); p.autoGain = v ("autogain") > 0.5f; p.matchLevels = v ("match") > 0.5f; p.transpose = v ("transpose"); p.pitchSource = (int) v ("pitchsrc"); p.keysOnly = false;
     p.grainSize = v ("grainsize"); p.spray = v ("spray"); p.focus = v ("focus"); p.space = (int) v ("space"); p.playback = (int) v ("playback");
     p.ringSize = v ("ring"); p.pitchFollow = v ("pitchfollow"); p.imprint = v ("imprint"); p.tilt = v ("tilt"); p.notesInfluence = v ("notesinf");
     p.width = v ("width"); p.spin = v ("spin"); p.nebula = v ("nebula"); p.decay = v ("decay");

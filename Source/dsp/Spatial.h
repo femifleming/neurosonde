@@ -12,7 +12,6 @@
 #pragma once
 #include "Ambi.h"
 #include "Synths.h"
-#include <Accelerate/Accelerate.h>
 
 namespace ns::dsp
 {
@@ -303,7 +302,7 @@ private:
         // speaker feeds for the whole block in one matrix product: [S x nCh] · [nCh x n]
         const int S = (int) speakers.size();
         for (int c = 0; c < nCh; ++c) std::copy (hoa[(size_t) c].begin(), hoa[(size_t) c].begin() + n, hoaFlat.begin() + (long) c * n);
-        cblas_sgemm (CblasRowMajor, CblasNoTrans, CblasNoTrans, S, n, nCh, 1.0f, decFlat.data(), nCh, hoaFlat.data(), n, 0.0f, spk.data(), n);
+        ns::ml::gemm (false, false, S, n, nCh, 1.0f, decFlat.data(), hoaFlat.data(), 0.0f, spk.data());   // Accelerate on the Mac
         if (format == OutFormat::Binaural)
         {
             if (nOut < 2) return;

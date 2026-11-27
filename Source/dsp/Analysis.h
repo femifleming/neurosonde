@@ -9,8 +9,9 @@ namespace ns::dsp
 {
 using namespace ns::ml;
 
-/** Real FFT of size N (power of two) through vDSP. */
-struct RealFFT
+#if defined(__APPLE__)
+/** Real FFT of size N (power of two) through vDSP (the Mac). */
+struct RealFFTvDSP
 {
     int N = 0, log2N = 0;
     FFTSetup setup = nullptr;
@@ -22,7 +23,7 @@ struct RealFFT
         setup = vDSP_create_fftsetup ((vDSP_Length) log2N, kFFTRadix2);
         re.assign ((size_t) N / 2, 0); im.assign ((size_t) N / 2, 0);
     }
-    ~RealFFT() { if (setup) vDSP_destroy_fftsetup (setup); }
+    ~RealFFTvDSP() { if (setup) vDSP_destroy_fftsetup (setup); }
     /** x[N] -> power spectrum pw[N/2+1] (unnormalised |X|^2 / N^2 scale) */
     void power (const float* x, float* pw)
     {
@@ -56,6 +57,88 @@ struct RealFFT
         vDSP_vsmul (x, 1, &s, x, 1, (vDSP_Length) N);
     }
 };
+
+#endif
+
+/** The same real FFT, portable (Windows, Linux): an iterative radix-2 complex FFT of N/2 points on the even/odd
+    samples packed as complex, then the split into the real spectrum. Twiddles are computed in double precision. The
+    three calls give exactly what the vDSP version gives (same conventions and scaling; tests/FFTCheck.cpp). */
+struct RealFFTPortable
+{
+    int N = 0, H = 0;
+    std::vector<std::complex<float>> w, z, wr; std::vector<int> rev;
+    void init (int n)
+    {
+        N = n; H = n / 2;
+        int bits = 0; while ((1 << bits) < H) ++bits;
+        rev.assign ((size_t) H, 0);
+        for (int i = 0; i < H; ++i) { int r = 0; for (int b = 0; b < bits; ++b) if (i & (1 << b)) r |= 1 << (bits - 1 - b); rev[(size_t) i] = r; }
+        w.resize ((size_t) std::max (1, H / 2));
+        for (int k = 0; k < H / 2; ++k) w[(size_t) k] = std::polar (1.0, -2.0 * M_PI * k / H);
+        wr.resize ((size_t) H);
+        for (int k = 0; k < H; ++k) wr[(size_t) k] = std::polar (1.0, -2.0 * M_PI * k / N);
+        z.assign ((size_t) H, {});
+    }
+    /** in-place complex FFT of size H (sign -1 forward, +1 inverse, unscaled) */
+    void cfft (std::complex<float>* a, bool inverse) const
+    {
+        for (int i = 0; i < H; ++i) if (i < rev[(size_t) i]) std::swap (a[i], a[rev[(size_t) i]]);
+        for (int len = 2; len <= H; len <<= 1)
+        {
+            const int half = len / 2, step = H / len;
+            for (int i = 0; i < H; i += len)
+                for (int j = 0; j < half; ++j)
+                {
+                    std::complex<float> t = w[(size_t) (j * step)]; if (inverse) t = std::conj (t);
+                    const std::complex<float> u = a[i + j], v = a[i + j + half] * t;
+                    a[i + j] = u + v; a[i + j + half] = u - v;
+                }
+        }
+    }
+    /** X[k] = sum x[n] e^{-2 pi i k n / N}, k = 0..N/2 */
+    void forward (const float* x, std::complex<float>* X)
+    {
+        for (int n = 0; n < H; ++n) z[(size_t) n] = { x[2 * n], x[2 * n + 1] };
+        cfft (z.data(), false);
+        for (int k = 0; k <= H; ++k)
+        {
+            const std::complex<float> a = z[(size_t) (k % H)], b = std::conj (z[(size_t) ((H - k) % H)]);
+            const std::complex<float> even = 0.5f * (a + b), odd = std::complex<float> (0, -0.5f) * (a - b);
+            const std::complex<float> tw = k < H ? wr[(size_t) k] : std::complex<float> (-1, 0);
+            X[k] = even + tw * odd;
+        }
+        X[0] = { X[0].real(), 0 }; X[H] = { X[H].real(), 0 };
+    }
+    /** power spectrum, the vDSP version's scale: (2 |X_k| / N)^2 */
+    void power (const float* x, float* pw)
+    {
+        thread_local std::vector<std::complex<float>> X; X.resize ((size_t) H + 1);
+        forward (x, X.data());
+        const float s = 2.0f / (float) N;
+        for (int k = 0; k <= H; ++k) { const float a = X[(size_t) k].real() * s, b = X[(size_t) k].imag() * s; pw[k] = a * a + b * b; }
+    }
+    /** x[n] = (1/N) sum X[k] e^{+2 pi i k n / N} over the Hermitian spectrum (the imaginary parts of DC and Nyquist
+        are ignored, as vDSP does) */
+    void inverse (const std::complex<float>* X, float* x)
+    {
+        for (int k = 0; k < H; ++k)
+        {
+            const std::complex<float> a = k == 0 ? std::complex<float> (X[0].real(), 0) : X[k];
+            const std::complex<float> b = std::conj (k == 0 ? std::complex<float> (X[H].real(), 0) : X[H - k]);
+            const std::complex<float> even = a + b, odd = (a - b) * std::conj (wr[(size_t) k]);
+            z[(size_t) k] = even + std::complex<float> (0, 1) * odd;
+        }
+        cfft (z.data(), true);
+        const float s = 0.5f / (float) H;
+        for (int n = 0; n < H; ++n) { x[2 * n] = z[(size_t) n].real() * s; x[2 * n + 1] = z[(size_t) n].imag() * s; }
+    }
+};
+
+#if defined(__APPLE__)
+using RealFFT = RealFFTvDSP;        // Accelerate on the Mac
+#else
+using RealFFT = RealFFTPortable;
+#endif
 
 inline float hzToMel (float f) { return 2595.0f * std::log10 (1.0f + f / 700.0f); }
 inline float melToHz (float m) { return 700.0f * (std::pow (10.0f, m / 2595.0f) - 1.0f); }

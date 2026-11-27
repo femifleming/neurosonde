@@ -1,9 +1,22 @@
 # neurosonde
 
-A VST3 / AU / standalone **audio effect** for macOS: it goes on an audio track, learns
-from the audio that passes through it (live, or from files), and resynthesises generative sound from what it has
-learned. No MIDI: audio in, audio out. Plus **neurosonde space**, the same instrument rendered into
+An **audio effect** for macOS (AU, VST3, app), Windows (VST3, app) and Linux (VST3, LV2, app): it goes on an audio
+track, learns from the audio that passes through it (live, or from files), and resynthesises generative sound from
+what it has learned. No MIDI: audio in, audio out. Plus **neurosonde space**, the same instrument rendered into
 space, placed by a network that learns the stereo image of what it hears.
+
+**New in 1.1**
+- **seven more synthesis engines**, each a whole model: modal (40 resonant modes, string to bell), membrane (a struck
+  2-D drum skin), fm (four operators), bowed (a bowed waveguide string), scanned (a ring of masses pushed by the
+  spectrum), pulsar (pulsarets at the formants) and swarm (partials flocking to the peaks). Eighteen in all.
+- **gain staging**: a new gain page with a meter at every stage, a look-ahead limiter at a ceiling (no sample
+  leaves above it), auto gain, and every engine level-matched to the loudness the network decodes. The footer of
+  every page shows the output peak and whether anything clipped.
+- **Windows and Linux** builds, with the same sound as the Mac (the FFT and the matrix products are held to Apple's
+  Accelerate by tests), and a Homebrew cask.
+- fixes: the harmonic engine's noise follows how loud the noise really is (tonal sounds were buried in hiss); the
+  phantom engine no longer starts as a click train; the bowed string plays its highest notes; the voice engine sat
+  far under the others; brain files on Windows; the plug-in loads on macOS 12 again.
 
 ![the main page: the self-organising map over the latent space](docs/img/constellation.png)
 
@@ -29,11 +42,43 @@ space, placed by a network that learns the stereo image of what it hears.
 - **patch notes**: hashed character n-grams (fastText-style, random projection) + 8 lexicon axes
   (bright warm dense motion rough wide wet dream, with negation) → a 32-d vector that conditions the network, names
   the stars, and steers the sound directly. The journal is shared by every instance and the app.
-- **synthesis**: four layers, each one of 11 engines — harmonic (DDSP), phantom (magnitude-only resynthesis,
-  imprintable on the input), partials, grains (Cloudfin), mosaic (point / ring / path, after Coalescence), ear tones
-  (Oneirophone), strings (Tantri), voice (Spreekbuis), gendy (Xenakis), table (disting EX), tape (openprocess / Oval) —
-  combined by **stack**, **morph** (by hand, network, stars or lfo), **merge** (spectral log-magnitude interpolation)
-  or **imprint** (one layer's envelope on another). Then stargate (stereo field) and nebula (FDN reverb).
+- **synthesis**: four layers, each one of 18 engines, all driven by what the network decodes every 10 ms (the
+  spectral envelope, the harmonic distribution, the noise bands, pitch, loudness, brightness, noisiness, onsets and
+  the latent itself). `character` is each engine's own extra dimension.
+
+  | engine | what it is | character |
+  |---|---|---|
+  | harmonic | DDSP: 48 harmonics at the decoded distribution + 32 filtered noise bands (Engel et al. 2020) | more noise |
+  | phantom | magnitude-only inverse STFT, phase propagated (imprintable on the live input) | phase scatter |
+  | partials | 32 additive peaks: the envelope's peaks + a stretched harmonic series | inharmonicity |
+  | grains | granular recall of remembered moments by modern-Hopfield attention (after Cloudfin) | density |
+  | mosaic | concatenative point / ring / path (after Coalescence) | unit length |
+  | ear tones | difference-tone primaries: the ear makes the pitch (after Oneirophone) | primaries' region |
+  | strings | 24 sympathetic Karplus–Strong strings with a jawari bridge (after Tantri) | buzz |
+  | voice | glottal source through five formants found in the envelope (after Spreekbuis) | formant shift |
+  | gendy | Xenakis' dynamic stochastic synthesis | roughness |
+  | table | a wavetable rebuilt each hop from the decoded harmonics, wavefolded (after disting EX) | fold |
+  | tape | skipping micro-loops and dust (after openprocess / Oval) | skipping |
+  | **modal** (1.1) | 40 resonant modes (decaying phasors) at the envelope's peaks + a partial series, struck on onsets, stirred by the noise; higher modes die faster (after Rings) | string → bell (free-bar ratios), longer ring |
+  | **membrane** (1.1) | a 2-D finite-difference wave equation on a 14 × 14 skin (after Bilbao), run at the rate that tunes it to the decoded pitch; tension modulation bends the pitch on hard hits; struck where the latent says, two pickups | sustain |
+  | **fm** (1.1) | four operators (Chowning): modulator ratios = the strongest decoded harmonics, indices from brightness and noisiness, held under Carson's rule | stack → two pairs, feedback |
+  | **bowed** (1.1) | a bowed string: two waveguides joined by a friction table (McIntyre, Schumacher & Woodhouse; Smith), three body resonances; bow speed = loudness, position = the latent | bow pressure (scratch) |
+  | **scanned** (1.1) | scanned synthesis (Verplank, Mathews & Shaw): a ring of 64 masses on springs, each pushed by one mel band, moving at 1 kHz; its shape read as a band-limited wavetable | looser springs, more motion |
+  | **pulsar** (1.1) | pulsar synthesis (Roads): Hann-windowed pulsarets at the two strongest formants, one per period; noisiness masks pulsars at random | shorter duty, wider formants |
+  | **swarm** (1.1) | 48 partials as boids in log-frequency (Reynolds; Blackwell): drawn up the envelope's slope, kept apart, aligned | turbulence |
+
+  Layers combine by **stack**, **morph** (by hand, network, stars or lfo), **merge** (spectral log-magnitude
+  interpolation) or **imprint** (one layer's envelope on another). Then stargate (stereo field) and nebula (FDN
+  reverb).
+- **gain staging** (1.1): every layer is level-matched to the loudness the network decodes (over about 300 ms, only
+  while there is sound to match, never boosting near-silence; −24 to +18 dB; *match engine levels*, on by default), so
+  any engine sits where the input does and follows its dynamics. Then the output gain (and optional **auto gain**,
+  which brings the synthesis to the input's loudness over a few seconds, ±24 dB), the dry / wet mix, and a
+  **look-ahead limiter** at the **ceiling** (−12 to 0 dBFS, default −1): for every sample the gain that keeps the
+  loudest channel under the ceiling, a minimum over the 1.3 ms look-ahead, an 80 ms release and a moving average over
+  the same window, applied to the delayed signal — no sample leaves above the ceiling, and the gain never steps.
+  *Clean* is transparent (bit-exact below the ceiling); *soft* saturates into the ceiling first. It can't be turned
+  off. Its 1.3 ms is reported to the host as latency. In neurosonde space it is linked across every output channel.
 - **files**: drop to feed (learn + remember), alt-drop to process (render through the network → ~/Music/Neurosonde),
   shift-drop (or "train offline...") to train offline.
 - **learning: online or offline**.
@@ -70,6 +115,14 @@ on the left and rec in the mirrored place on the right, side columns of equal wi
 - **network**: learning | the network diagram and training curves | memories.
 - **synthesis**: four columns, each split at the same height as its mirror column: layers 1 2 / layers 3 4,
   dream / pitch, memory · grains / mosaic · tape, spectral · stargate · nebula / input · output.
+- **gain** (1.1): input · layers | gain staging | output · limiter. In the middle, a peak meter (−60 to +6 dBFS, 1.5 dB
+  cells, peak held) for every stage: the input after its gain, each of the four layers, the synthesis after the
+  output gain, what reaches the limiter, and the output, with the 0 dBFS line, the ceiling (dashed) and the limiter's
+  gain reduction. Under it: the limiter and its look-ahead, the output peak and headroom, loudness in and out, auto
+  gain, and two counts of overs — samples that reached the limiter above the ceiling, and samples that left above
+  0 dBFS (zero, always). Click to reset. Left: input gain, the four layer levels, match engine levels. Right: output,
+  dry / wet, ceiling, limiter (clean / soft), auto gain. The footer of every page shows the output peak (held), the
+  gain reduction and whether anything clipped.
 - **patch notes**: what the notes say | the notes | journal.
 - **corpus**: memory | files (feed, process, train offline, the drop zone, jobs) | offline training (epochs and
   the train / validation curves).
@@ -150,24 +203,49 @@ The same source built with `NS_SPATIAL=1` (plug-in code `Nssp`), sharing the sam
   impulses, denormal-level, noise), random block sizes, random and ramped automation of every parameter, parameter
   text round trips, state round trip into a fresh instance, corrupt state, prepare / release / reset cycles, bypass,
   non-realtime rendering, the editor opened and closed while audio runs, four instances at once on four threads,
-  real-time factor, and a soak (`--soak seconds`: finiteness, memory growth, cpu creep).
-- auval for both AUs; ASan fuzz (`NS_FUZZ=1`); unit tests below.
+  real-time factor, and a soak (`--soak seconds`: finiteness, memory growth, cpu creep). Since 1.1 every one of these
+  must keep the output at or under 0 dBFS (91 checks, all pass).
+- `EngineCheck` (1.1): all 18 engines alone, at 4 pitches × tonal / noisy × character 0 / 0.5 / 1 — finite, bounded,
+  audible, level-matched to within about 1 dB of the decoded loudness, under 3 % of real time each; the pitched
+  engines' pitch by autocorrelation (110 to 880 Hz, worst 4.4 cents); the limiter (input up to +24 dBFS never leaves
+  above the ceiling, bit-transparent below it, latency exact, 64 channels at 96 kHz).
+- `FFTCheck` and `GemmCheck` (1.1): the portable FFT and matrix product (Windows, Linux) against Apple's vDSP and
+  cblas_sgemm on the Mac (agreement to 3e-7 / within float rounding over 324 shapes), and against their definitions in
+  double precision elsewhere, so the analysis, the networks and the spectral engines sound the same everywhere.
+- auval for both AUs; ASan fuzz (`NS_FUZZ=1`); the component checks below; every check runs on macOS, Windows and
+  Linux in CI on every push.
 - pluginval (Tracktion) can be run on the installed bundles as well:
   `pluginval --strictness-level 10 --validate ~/Library/Audio/Plug-Ins/VST3/Neurosonde.vst3`
 
-## install (build from source)
-macOS 12+ (Apple Silicon or Intel; it uses Accelerate), CMake 3.22+, Ninja, Xcode command line tools.
+## install
+Download from the [releases page](https://github.com/femifleming/neurosonde/releases):
+- **macOS** 12 or later (Apple silicon and Intel): `Neurosonde-macOS.zip`, or with Homebrew:
+
+      brew tap femifleming/tap
+      brew install --cask femifleming/tap/neurosonde
+
+  The builds are signed ad hoc, not notarised; the cask clears the download quarantine. By hand: copy the
+  `.component` files to `~/Library/Audio/Plug-Ins/Components`, the `.vst3` to `~/Library/Audio/Plug-Ins/VST3` and the
+  apps to `/Applications`.
+- **Windows** 10 or later (x64): `Neurosonde-Windows.zip`; copy the `.vst3` folders to
+  `C:\Program Files\Common Files\VST3`, run the `.exe` apps from anywhere.
+- **Linux** (x64, glibc 2.35 or later): `Neurosonde-Linux.tar.gz`; copy the `.vst3` folders to `~/.vst3` and the
+  `.lv2` folders to `~/.lv2`.
+
+The shared brain lives in the user's application data folder: `~/Library/Application Support/Neurosonde` on the
+Mac, `%APPDATA%\Neurosonde` on Windows, `~/.config/Neurosonde` on Linux (brain.nsb, the journal, memories).
+
+### build from source
+CMake 3.22+, a C++20 compiler (Xcode command line tools, Visual Studio 2022, or GCC 11+ with the JUCE Linux
+packages), Ninja on the Mac and Linux.
 
     git clone https://github.com/femifleming/neurosonde && cd neurosonde
     cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release     # fetches JUCE 9.0.5 (or -DJUCE_DIR=/path/to/JUCE)
     cmake --build build
-    # plug-ins and apps (or configure with -DNS_COPY_AFTER_BUILD=ON to install on every build):
-    cp -R build/Neurosonde_artefacts/Release/VST3/Neurosonde.vst3 ~/Library/Audio/Plug-Ins/VST3/
-    cp -R build/Neurosonde_artefacts/Release/AU/Neurosonde.component ~/Library/Audio/Plug-Ins/Components/
-    cp -R build/Neurosonde_artefacts/Release/Standalone/Neurosonde.app /Applications/
-    # the same for build/NeurosondeSpace_artefacts ("Neurosonde Space")
+    # macOS: configure with -DNS_COPY_AFTER_BUILD=ON to install on every build, or copy from build/*_artefacts/Release
 
-The shared brain lives in `~/Library/Application Support/Neurosonde` (brain.nsb, the journal, memories).
+The Mac uses Apple's Accelerate (the vDSP FFT and cblas_sgemm); Windows and Linux use a portable radix-2 FFT and a
+portable matrix product, which tests hold to Accelerate's results (see validation).
 
 ## screenshots
 | | |
@@ -175,14 +253,16 @@ The shared brain lives in `~/Library/Application Support/Neurosonde` (brain.nsb,
 | ![network](docs/img/network.png) network | ![synthesis](docs/img/synthesis.png) synthesis |
 | ![patch notes](docs/img/patch-notes.png) patch notes | ![corpus](docs/img/corpus.png) corpus |
 | ![space](docs/img/space.png) neurosonde space | ![lab](docs/img/lab.png) lab |
+| ![gain](docs/img/gain.png) gain staging (1.1) | |
 
 ## build / test
     cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release && cmake --build build
     build/NeuroTest_artefacts/Release/NeuroTest --shots shots        # host test + screenshots (own temp brain)
     build/NeuroSpaceTest_artefacts/Release/NeuroSpaceTest --shots s  # the same for neurosonde space (+ 7th-order bus)
     NS_FUZZ=1 build/NeuroTest_artefacts/Release/NeuroTest            # + random rates, blocks, parameters, MIDI (run under ASan too)
-    clang++ -std=c++20 -O2 -framework Accelerate tests/GradCheck.cpp  # gradient checks (also AnalysisCheck, BrainCheck, CoreCheck,
-                                                                      # StereoCheck, SpatialCheck, OfflineCheck)
+    cd build && ctest                                                # the component checks: AnalysisCheck, BrainCheck, CoreCheck,
+                                                                     # GradCheck, OfflineCheck, SpatialCheck, StereoCheck, FFTCheck,
+                                                                     # GemmCheck, EngineCheck
     build/HostCheck_artefacts/Release/HostCheck --soak 300           # validate the installed plug-ins
 
 Look: after Ryoji Ikeda, black and white only: a measuring grid, hairlines, white points and squares, binary

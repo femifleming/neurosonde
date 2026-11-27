@@ -67,8 +67,9 @@ def main():
     import pedalboard
     p = pedalboard.load_plugin(PLUGIN)
     # phantom + grains, dark and slow (tried: the four default layers were a bright harmonic buzz)
+    # (pedalboard sets parameters in their displayed units: percentages are 0-100, not 0-1)
     for k, v in dict(layer_1_engine="phantom", layer_2_on=True, layer_2_engine="grains", tilt=-0.5,
-                     lucidity=0.6, nebula=0.6, nebula_decay=0.8, dry_wet=1.0).items():
+                     lucidity=60.0, nebula=60.0, nebula_decay=80.0, dry_wet=100.0).items():
         try:
             setattr(p, k, v)
         except Exception as e:

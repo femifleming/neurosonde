@@ -1,4 +1,6 @@
 #include "../Source/ml/Brain.h"
+#include <memory>
+#include "TestDir.h"
 #include <cstdio>
 using namespace ns::ml; using namespace ns::dsp;
 static int fails = 0;
@@ -21,13 +23,12 @@ static std::vector<FeedItem> feed (std::function<float (int)> gen, int seconds, 
 
 int main()
 {
-    const std::string dir = "/private/tmp/ns_brain_test";
-    std::system (("rm -rf " + dir).c_str());
+    const std::string dir = testDir ("ns_brain_test");
     std::mt19937 rng (1); std::uniform_real_distribution<float> u (-1, 1);
     auto tone = feed ([] (int i) { double t = i / 48000.0; return (float) (0.3 * std::sin (2 * M_PI * 220 * t) + 0.15 * std::sin (2 * M_PI * 440 * t)); }, 6, "warm tungsten organ");
     auto hiss = feed ([&] (int) { return 0.2f * u (rng); }, 6, "dust and rain");
     {
-        Brain b (dir);
+        auto bp = std::make_unique<Brain> (dir); Brain& b = *bp;   // (a Brain is ~0.5 MB: never on the stack, Windows gives 1 MB)
         auto ring = b.addFeeder();
         // interleave the two sounds the way a performance would
         size_t i = 0, j = 0;
@@ -63,7 +64,7 @@ int main()
     }
     // two "processes" sharing the folder: both start from the file, learn different things, both sync
     {
-        Brain a (dir), b (dir);
+        auto ap = std::make_unique<Brain> (dir), bp = std::make_unique<Brain> (dir); Brain& a = *ap; Brain& b = *bp;
         const uint64_t start = a.stats.vaeSteps;
         CHECK (start > 1500, "a new brain loads the shared file (%llu steps)", (unsigned long long) start);
         auto ra = a.addFeeder(), rb = b.addFeeder();

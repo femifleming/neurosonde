@@ -1,5 +1,7 @@
 // offline training: epochs, a block split, early stopping, best-weights restore, and that it really learns
 #include "../Source/ml/Brain.h"
+#include <memory>
+#include "TestDir.h"
 #include <cstdio>
 using namespace ns::ml; using namespace ns::dsp;
 static int fails = 0;
@@ -19,7 +21,7 @@ static std::vector<FeedItem> feed (std::function<float (int)> gen, int seconds, 
 }
 int main()
 {
-    std::system ("rm -rf /private/tmp/ns_offline_test");
+    testDir ("ns_offline_test"); testDir ("ns_offline_test2");
     std::mt19937 rng (3); std::uniform_real_distribution<float> u (-1, 1);
     // a small "album": a melody, a drone with beating, filtered noise swells
     std::vector<std::vector<FeedItem>> files;
@@ -27,7 +29,7 @@ int main()
                                          return (float) (0.3 * std::exp (-std::fmod (t, 1 / 3.0) * 4) * std::sin (2 * M_PI * f * t)); }, 20, "a small melody"));
     files.push_back (feed ([] (int i) { const double t = i / 48000.0; return (float) (0.2 * std::sin (2 * M_PI * 110 * t) + 0.2 * std::sin (2 * M_PI * 110.7 * t) + 0.05 * std::sin (2 * M_PI * 330 * t)); }, 20, "drone, beating"));
     files.push_back (feed ([&] (int i) { const double t = i / 48000.0; return (float) (0.25 * (0.5 + 0.5 * std::sin (t * 1.3)) * u (rng)); }, 20, "noise swells"));
-    Brain b ("/private/tmp/ns_offline_test");
+    auto bp = std::make_unique<Brain> (testDir ("ns_offline_test", false)); Brain& b = *bp;   // (heap: a Brain is ~0.5 MB)
     b.settings.frozen = true;   // offline mode: nothing learned from playback
     const auto t0 = std::chrono::steady_clock::now();
     b.trainOffline (files, 40, 5);
@@ -55,11 +57,11 @@ int main()
     for (int k = 0; k < 50; ++k) std::this_thread::sleep_for (std::chrono::milliseconds (5));
     CHECK (b.stats.vaeSteps == steps, "offline mode is frozen while playing (%llu steps before and after)", (unsigned long long) steps);
     // cancel
-    Brain c ("/private/tmp/ns_offline_test2");
+    auto cp = std::make_unique<Brain> (testDir ("ns_offline_test2", false)); Brain& c = *cp;
     std::thread t ([&] { std::this_thread::sleep_for (std::chrono::milliseconds (300)); c.offline.cancel = true; });
     c.trainOffline (files, 200, 50); t.join();
     CHECK (c.offline.state == 4 && c.offline.epoch < 200, "cancel stops it (epoch %d, state %d)", c.offline.epoch.load(), c.offline.state.load());
     std::printf (fails ? "%d FAILED\n" : "all passed\n", fails);
-    std::system ("rm -rf /private/tmp/ns_offline_test /private/tmp/ns_offline_test2");
+    testDir ("ns_offline_test"); testDir ("ns_offline_test2");
     return fails;
 }

@@ -301,8 +301,11 @@ def base_frame(c, chapters, ci):
         d.text((x, y), ln, font=F_MONO_S, fill=TEXT2)
         y += 21
     c["_rows_y"] = y + 14
-    # minimap window
-    window(d, (RX, VY + 520, RX + RW, VY + VH), "view", None, "1280 x 800")
+    # minimap window (or, in the demonstration, the clip's settings)
+    if c.get("kind") == "demo":
+        window(d, (RX, VY + 520, RX + RW, VY + VH), "settings", None, "this clip")
+    else:
+        window(d, (RX, VY + 520, RX + RW, VY + VH), "view", None, "1280 x 800")
     return im
 
 
@@ -411,6 +414,8 @@ def frame(c, ci, chapters, starts, dur, t0, env, base, mini_cache, t):
             im = Image.blend(Image.new("RGB", (W, H), BG), im, max(0.0, (CARD - t) / 0.25))
         footer(ImageDraw.Draw(im), c, ci, chapters, gt, t, None, None, env)
         return im
+    if c.get("kind") == "demo":
+        return demo_frame(c, ci, chapters, starts, dur, t0, env, base, t, c.get("_plays", []))
     name, v, k, into, u = camera(c, starts, t)
     im = base.copy()
     d = ImageDraw.Draw(im)
@@ -434,7 +439,7 @@ def frame(c, ci, chapters, starts, dur, t0, env, base, mini_cache, t):
     d.rectangle([VX - 1, VY - 1, VX + VW, VY + VH], outline=EDGE)
     corners(d, (VX - 1, VY - 1, VX + VW, VY + VH), 0.7, 6)
     page = {"page0": "constellation", "page1": "network", "page2": "synthesis", "page3": "patch notes",
-            "page4": "corpus", "space/page5": "space", "page6": "lab"}[name]
+            "page4": "corpus", "space/page5": "space", "page6": "lab", "page7": "gain"}[name]
     d.text((VX, VY - 34), "page %s  %s%s" % (name[-1], page, "   (neurosonde space)" if name.startswith("space") else ""),
            font=F_MONO_S, fill=TEXT2)
     zoom = SW / v[2]
@@ -546,7 +551,7 @@ def ensure_inputs(seconds, want_bed):
     return bed if want_bed and os.path.exists(bed) else None
 
 
-def mix_audio(total, placed, bed_path, out):
+def mix_audio(total, placed, bed_path, out, clips=(), mutes=()):
     n = int(math.ceil(total * SR))
     voice = np.zeros(n, np.float32)
     for start, v in placed:
@@ -576,11 +581,26 @@ def mix_audio(total, placed, bed_path, out):
             env[i:i + 64] = acc
         speaking = np.clip(env * 10, 0, 1)
         gain = 0.25 - 0.15 * speaking             # about -32 dB in the gaps, -40 dB under the voice
+        for (a, b) in mutes:                      # the demonstration: no bed (ramps of half a second)
+            ia, ib = int(a * SR), int(b * SR)
+            r = int(0.5 * SR)
+            ramp = np.ones(n, np.float32)
+            ramp[max(0, ia - r):ia] = np.linspace(1, 0, ia - max(0, ia - r))
+            ramp[ia:ib] = 0
+            ramp[ib:min(n, ib + r)] = np.linspace(0, 1, min(n, ib + r) - ib)
+            gain = gain * ramp
         fade = np.ones(n, np.float32)
         fi, fo = int(3 * SR), int(4 * SR)
         fade[:fi] = np.linspace(0, 1, fi)
         fade[-fo:] = np.linspace(1, 0, fo)
         mix += bed * (gain * fade)[:, None]
+    # the demonstration clips: each at the voice's loudness (they were rendered at -22 dBFS rms)
+    vr = float(np.sqrt((voice[voice != 0] ** 2).mean())) if np.any(voice) else 0.1
+    for start, x in clips:
+        s0 = int(start * SR)
+        e = min(n, s0 + len(x))
+        g = vr / (float(np.sqrt((x ** 2).mean())) + 1e-9)
+        mix[s0:e] += x[:e - s0] * g
     pk = np.abs(mix).max()
     if pk > 0.84:                                 # headroom for the AAC encoder (about -1.5 dBFS)
         mix *= 0.84 / pk
@@ -599,6 +619,161 @@ def frame_env(voice, t0, dur):
 
 
 # ---------------------------------------------------------------------------
+# The audio demonstration: real sound through the real plug-in (render_demos.py), drawn as spectrograms.
+
+DEMOS = os.path.join(WORK, "demos")
+DEMO_SRC = os.path.join(WORK, "demo-src")
+DEMO_GAP, DEMO_LEAD = 0.6, 0.7      # between clips; after the voice, before the first clip
+
+
+def ensure_demos():
+    """the source phrase (Kokoro, a different voice from the narrator) and the renders through the installed plug-in"""
+    if os.path.exists(os.path.join(DEMOS, "demos.json")):
+        return json.load(open(os.path.join(DEMOS, "demos.json")))
+    os.makedirs(DEMO_SRC, exist_ok=True)
+    voice = os.path.join(DEMO_SRC, "voice.wav")
+    if not os.path.exists(voice):
+        jf = os.path.join(WORK, "demo_tts.json")
+        json.dump([dict(text="The tide comes in slowly over the grey sand. Somewhere a bell is ringing, far away, "
+                              "and the gulls answer it.", out=voice)], open(jf, "w"))
+        subprocess.run([TTS_PY, os.path.join(HERE, "tts_kokoro.py"), jf, "am_michael", "0.95"], check=True)
+        os.remove(jf)
+    subprocess.run([AUDIO_PY, os.path.join(HERE, "render_demos.py"), DEMO_SRC, DEMOS], check=True)
+    return json.load(open(os.path.join(DEMOS, "demos.json")))
+
+
+_clips = {}
+
+
+def clip(code, part):
+    """(stereo float32 [n, 2] at SR) of a demo clip, part 'in' or 'out'"""
+    k = (code, part)
+    if k not in _clips:
+        raw = subprocess.run(["ffmpeg", "-v", "error", "-i", os.path.join(DEMOS, "%s_%s.wav" % (code, part)),
+                              "-ar", str(SR), "-ac", "2", "-f", "f32le", "-"], check=True, stdout=subprocess.PIPE).stdout
+        _clips[k] = np.frombuffer(raw, np.float32).reshape(-1, 2).copy()
+    return _clips[k]
+
+
+_specs = {}
+
+
+def spectrogram(code, part, w, h):
+    """a log-frequency spectrogram (40 Hz - 16 kHz, 90 dB below the clip's peak = black), w x h, greyscale"""
+    k = (code, part, w, h)
+    if k in _specs:
+        return _specs[k]
+    x = clip(code, part).mean(1)
+    N, hop = 2048, 256
+    win = np.hanning(N).astype(np.float32)
+    frames = max(1, (len(x) - N) // hop)
+    idx = np.arange(N)[None, :] + hop * np.arange(frames)[:, None]
+    mag = np.abs(np.fft.rfft(x[idx] * win, axis=1)) + 1e-9
+    db = 20 * np.log10(mag)
+    db -= db.max()
+    freqs = np.fft.rfftfreq(N, 1 / SR)
+    rows = np.geomspace(40, 16000, h)[::-1]
+    bins = np.clip(np.searchsorted(freqs, rows), 1, len(freqs) - 1)
+    img = db[:, bins].T                                  # h x frames
+    img = np.clip((img + 90) / 90, 0, 1) ** 1.6
+    im = Image.fromarray((img * 255).astype(np.uint8), "L").resize((w, h), Image.BILINEAR)
+    _specs[k] = im
+    return im
+
+
+def waveform(code, part, w):
+    """per-column peak of the clip (0..1)"""
+    x = np.abs(clip(code, part)).max(1)
+    cols = np.array_split(x, w)
+    return np.array([c.max() if len(c) else 0 for c in cols])
+
+
+def demo_frame(c, ci, chapters, starts, dur, t0, env, base, t, plays):
+    """a demo chapter: the input and the output of the clip being explained, as spectrograms with a playhead"""
+    k = 0
+    for i, st in enumerate(starts):
+        if t >= st:
+            k = i
+    seg = c["segs"][k]
+    meta = c["_meta"][seg["demo"]]          # (carried in the chapter: render workers are separate processes)
+    im = base.copy()
+    d = ImageDraw.Draw(im)
+    playing = None
+    for (a, b, code, part) in plays:
+        if a <= t < b and code == seg["demo"]:
+            playing = (part, (t - a) / max(1e-3, b - a), t - a, b - a)
+    into = t - starts[k]
+    fade = ease(into / 0.5)
+    for row, part in enumerate(("in", "out")):
+        y0 = VY + row * (VH // 2) + (0 if row == 0 else 8)
+        hgt = VH // 2 - 8
+        title = ("input   %s" % meta["input"]) if part == "in" else ("output   %s" % meta["title"])
+        inner = window(d, (VX, y0, VX + VW, y0 + hgt), title, row, "playing" if playing and playing[0] == part else
+                       ("%.1f s" % meta["seconds"]))
+        sx, sy, sw = inner[0], inner[1] + 4, inner[2] - inner[0]
+        sh = inner[3] - inner[1] - 74
+        spec = spectrogram(seg["demo"], part, sw, sh)
+        bright = 1.0 if (playing and playing[0] == part) else 0.55
+        im.paste(spec.point(lambda p, b=bright * fade: int(p * b)).convert("RGB"), (sx, sy))
+        d.rectangle([sx - 1, sy - 1, sx + sw, sy + sh], outline=EDGE)
+        # frequency labels
+        for f in (100, 1000, 10000):
+            yy = sy + sh * (1 - math.log(f / 40) / math.log(16000 / 40))
+            d.line([(sx, yy), (sx + 6, yy)], fill=grey(0.6))
+            d.text((sx + 10, yy - 9), "%d hz" % f if f < 1000 else "%d khz" % (f // 1000), font=F_MONO_S, fill=grey(0.6 * fade))
+        # waveform strip
+        wy = sy + sh + 10
+        wf = waveform(seg["demo"], part, sw)
+        for xx in range(0, sw, 2):
+            a = wf[xx] * 26
+            d.line([(sx + xx, wy + 28 - a), (sx + xx, wy + 28 + a)], fill=grey((0.85 if bright > 0.9 else 0.4) * fade))
+        ruler(d, sx, wy + 64, sw, 7, 5, 0.18)
+        if playing and playing[0] == part:
+            px = sx + playing[1] * sw
+            d.line([(px, sy - 4), (px, wy + 60)], fill=WHITE, width=2)
+            d.text((sx + sw, wy + 40), "%05.2f / %05.2f s" % (playing[2], playing[3]), font=F_MONO_S, fill=TEXT, anchor="ra")
+        elif part not in seg.get("play", []):
+            msg = "the input, not played again here"
+            tw = F_MONO.getlength(msg)
+            d.rectangle([sx + sw / 2 - tw / 2 - 12, sy + sh / 2 - 16, sx + sw / 2 + tw / 2 + 12, sy + sh / 2 + 16], fill=BG, outline=EDGE)
+            d.text((sx + sw / 2, sy + sh / 2), msg, font=F_MONO, fill=grey(0.6), anchor="mm")
+    d.text((VX, VY - 34), "demonstration %s   %s" % (seg["demo"], meta["title"]), font=F_MONO_S, fill=TEXT2)
+    d.text((VX + VW, VY - 34), "rendered through the installed plug-in, a fresh brain, in real time", font=F_MONO_S,
+           fill=MUTED, anchor="ra")
+    ruler(d, VX, VY - 8, VW, 7, 5, 0.18)
+    # the chapter's points (at most nine shown, scrolling with the one being spoken)
+    y = c["_rows_y"]
+    first = max(0, min(k - 4, len(c["segs"]) - 9))
+    for i, sg in list(enumerate(c["segs"]))[first:first + 9]:
+        row = (RX + 10, y - 3, RX + RW - 10, y + 23)
+        if i == k:
+            d.rectangle(row, fill=SELECTED)
+            d.rectangle((row[0], row[1], row[0] + 2, row[3]), fill=WHITE)
+            col, icol = TEXT, TEXT2
+        elif i < k:
+            col, icol = TEXT2, MUTED
+        else:
+            col, icol = MUTED, (0x40,) * 3
+        d.text((RX + 20, y), "%02x" % i, font=F_MONO_S, fill=icol)
+        lab = sg["point"]
+        while F_MONO_S.getlength(lab) > RW - 90:
+            lab = lab[:-2]
+        d.text((RX + 56, y), lab, font=F_MONO_S, fill=col)
+        y += 26
+    # settings of this clip, in the bottom window
+    sy = VY + 584
+    for key, val in [kv for kv in meta["settings"] if kv[0] != "heard"] + [("brain heard", "%.0f s" % meta["heard"])]:
+        d.text((RX + 20, sy), key, font=F_MONO_S, fill=TEXT2)
+        d.text((RX + RW - 20, sy), val, font=F_MONO_S, fill=TEXT, anchor="ra")
+        sy += 24
+    footer(d, c, ci, chapters, t0 + t, t, k, 1.0, env)
+    if t > dur - 0.2:
+        im = Image.blend(Image.new("RGB", (W, H), BG), im, max(0.0, (dur - t) / 0.2))
+    return im
+
+
+DEMO_META = {}
+
 
 def overlay():
     """Every mark of every chapter drawn on its screenshot (to check the coordinates)."""
@@ -647,15 +822,37 @@ def main():
         sel = sel[lo:hi + 1]
     texts = [s["say"] for ci in sel for s in CHAPTERS[ci]["segs"]]
     voices = speak_all(texts)
+    if any(CHAPTERS[ci].get("kind") == "demo" for ci in sel):
+        for dm in ensure_demos()["demos"]:
+            DEMO_META[dm["code"]] = dict(title=dm["title"], settings=[tuple(x) for x in dm["settings"]],
+                                         seconds=dm["seconds"], heard=dm["heard"], input=dm.get("input", "the spoken phrase"))
     vi = 0
-    plans, placed, t0 = [], [], 0.0
+    plans, placed, clips, mutes, t0 = [], [], [], [], 0.0
     for ci in sel:
         c = CHAPTERS[ci]
         vs = voices[vi:vi + len(c["segs"])]
         vi += len(c["segs"])
-        starts, dur = chapter_plan(c, [len(v) / SR for v in vs])
-        for st, v in zip(starts, vs):
+        lens = []
+        for sg, v in zip(c["segs"], vs):
+            extra = 0.0
+            if c.get("kind") == "demo":
+                extra = DEMO_LEAD + sum(len(clip(sg["demo"], p)) / SR + DEMO_GAP for p in sg["play"])
+            lens.append(len(v) / SR + extra)
+        starts, dur = chapter_plan(c, lens)
+        c["_plays"] = []
+        if c.get("kind") == "demo":
+            c["_meta"] = dict(DEMO_META)
+        for st, v, sg in zip(starts, vs, c["segs"]):
             placed.append((t0 + st + 0.25, v))   # the voice starts just after the camera does
+            if c.get("kind") == "demo":
+                tt = st + 0.25 + len(v) / SR + DEMO_LEAD
+                for p in sg["play"]:
+                    x = clip(sg["demo"], p)
+                    clips.append((t0 + tt, x))
+                    c["_plays"].append((tt, tt + len(x) / SR, sg["demo"], p))
+                    tt += len(x) / SR + DEMO_GAP
+        if c.get("kind") == "demo":
+            mutes.append((t0 + CARD, t0 + dur))
         plans.append((ci, starts, dur, t0))
         t0 += dur
     total = t0
@@ -677,7 +874,7 @@ def main():
 
     bed = None if a.no_bed else ensure_inputs(total, True)
     audio = os.path.join(WORK, "audio.f32")
-    voice = mix_audio(total, placed, bed, audio)
+    voice = mix_audio(total, placed, bed, audio, clips, mutes)
     parts_dir = os.path.join(WORK, "parts")
     os.makedirs(parts_dir, exist_ok=True)
     jobs = [(ci, CHAPTERS[ci], CHAPTERS, starts, dur, t0, frame_env(voice, t0, dur), os.path.join(parts_dir, "c%02d.mp4" % ci))

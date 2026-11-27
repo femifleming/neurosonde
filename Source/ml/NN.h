@@ -2,7 +2,7 @@
 //
 // Everything here is real backpropagation: dense layers, FiLM conditioning (Perez et al. 2018), a GRU (Cho et al.
 // 2014) with truncated BPTT, Adam (Kingma & Ba 2014) with global-norm clipping, and helpers. Matrices are row-major
-// float vectors; batched products go through Accelerate (cblas_sgemm). No allocation happens in forward/backward
+// float vectors; batched products go through Accelerate (cblas_sgemm) on the Mac, a portable loop elsewhere. No allocation happens in forward/backward
 // once a Workspace has been sized, so the trainer thread can run steadily.
 #pragma once
 #include <vector>
@@ -12,11 +12,35 @@
 #include <algorithm>
 #include <random>
 #include <functional>
+// every standard header the project uses, here at the root of the include chain: MSVC's library pulls in less
+// through other headers than libc++ or libstdc++ do
+#include <array>
+#include <atomic>
+#include <cctype>
+#include <chrono>
+#include <complex>
+#include <condition_variable>
+#include <cstdio>
+#include <cstdlib>
+#include <deque>
+#include <fstream>
+#include <limits>
+#include <map>
+#include <memory>
+#include <mutex>
+#include <numeric>
+#include <set>
+#include <sstream>
+#include <string>
+#include <thread>
+#include <utility>
+
+#ifndef M_PI      // MSVC defines it only with _USE_MATH_DEFINES
+ #define M_PI 3.14159265358979323846
+#endif
 
 #if defined(__APPLE__)
- #ifndef ACCELERATE_NEW_LAPACK
-  #define ACCELERATE_NEW_LAPACK 1
- #endif
+ // the classic CBLAS interface: there on every macOS this runs on (the "new LAPACK" one needs macOS 13.3)
  #include <Accelerate/Accelerate.h>
  #define NS_HAVE_BLAS 1
 #else
@@ -27,7 +51,40 @@ namespace ns::ml
 {
 using Vec = std::vector<float>;
 
-// C[MxN] (+)= A[MxK] * B[KxN], with optional transposes. Row-major.
+// C[MxN] (+)= A[MxK] * B[KxN], with optional transposes. Row-major. The portable version (Windows, Linux) runs
+// row-wise so the inner loops run over contiguous memory and vectorise; tests/GemmCheck.cpp holds it to Accelerate's.
+inline void gemmPortable (bool transA, bool transB, int M, int N, int K, float alpha, const float* A, const float* B,
+                          float beta, float* C)
+{
+    thread_local std::vector<float> acol;
+    for (int i = 0; i < M; ++i)
+    {
+        float* c = C + (size_t) i * N;
+        if (beta == 0) std::fill (c, c + N, 0.0f); else if (beta != 1) for (int j = 0; j < N; ++j) c[j] *= beta;
+        const float* arow = A + (size_t) i * K;
+        if (transA) { acol.resize ((size_t) K); for (int k = 0; k < K; ++k) acol[(size_t) k] = A[(size_t) k * M + i]; arow = acol.data(); }
+        if (! transB)
+        {
+            for (int k = 0; k < K; ++k)
+            {
+                const float a = alpha * arow[k];
+                if (a == 0) continue;
+                const float* b = B + (size_t) k * N;
+                for (int j = 0; j < N; ++j) c[j] += a * b[j];
+            }
+        }
+        else
+        {
+            for (int j = 0; j < N; ++j)
+            {
+                const float* b = B + (size_t) j * K;
+                float s = 0; for (int k = 0; k < K; ++k) s += arow[k] * b[k];
+                c[j] += alpha * s;
+            }
+        }
+    }
+}
+
 inline void gemm (bool transA, bool transB, int M, int N, int K, float alpha, const float* A, const float* B,
                   float beta, float* C)
 {
@@ -35,14 +92,7 @@ inline void gemm (bool transA, bool transB, int M, int N, int K, float alpha, co
     cblas_sgemm (CblasRowMajor, transA ? CblasTrans : CblasNoTrans, transB ? CblasTrans : CblasNoTrans, M, N, K, alpha,
                  A, transA ? M : K, B, transB ? K : N, beta, C, N);
    #else
-    for (int i = 0; i < M; ++i)
-        for (int j = 0; j < N; ++j)
-        {
-            double s = 0;
-            for (int k = 0; k < K; ++k)
-                s += (double) (transA ? A[k * M + i] : A[i * K + k]) * (transB ? B[j * K + k] : B[k * N + j]);
-            C[i * N + j] = alpha * (float) s + (beta == 0 ? 0.0f : beta * C[i * N + j]);
-        }
+    gemmPortable (transA, transB, M, N, K, alpha, A, B, beta, C);
    #endif
 }
 

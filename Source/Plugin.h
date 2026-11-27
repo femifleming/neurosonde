@@ -17,7 +17,12 @@ struct BrainHolder
     std::shared_ptr<Brain> brain;
     BrainHolder()
     {
+        // ~/Library/Application Support/Neurosonde on the Mac, %APPDATA%\Neurosonde on Windows, ~/.config/Neurosonde on Linux
+       #if JUCE_MAC
         auto dir = juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory).getChildFile ("Application Support/Neurosonde");
+       #else
+        auto dir = juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory).getChildFile ("Neurosonde");
+       #endif
         if (auto* env = std::getenv ("NEUROSONDE_BRAIN_DIR")) dir = juce::File (juce::String (env));   // tests use their own brain
         dir.createDirectory();
         brain = std::make_shared<Brain> (dir.getFullPathName().toStdString());

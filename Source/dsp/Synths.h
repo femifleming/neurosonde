@@ -12,6 +12,13 @@
 //   gendy     Xenakis' dynamic stochastic synthesis (GENDY)
 //   table     wavetable regenerated from the decoded spectrum (disting EX)
 //   tape      skipping-CD micro-loops and dust (openprocess, after Oval)
+//   modal     40 resonant modes, string to bell (after Rings and modal synthesis)
+//   membrane  a struck 2-D membrane, finite differences, tension modulation (after Bilbao)
+//   fm        four-operator FM, ratios from the decoded harmonics (Chowning)
+//   bowed     a bowed waveguide string with bow friction and a body (McIntyre, Schumacher & Woodhouse; Smith)
+//   scanned   scanned synthesis: a ring of masses pushed by the decoded spectrum (Verplank, Mathews & Shaw)
+//   pulsar    pulsar synthesis at the decoded formants (Roads)
+//   swarm     48 partials flocking to the envelope's peaks (Reynolds, Blackwell)
 #pragma once
 #include "Analysis.h"
 
@@ -33,6 +40,7 @@ struct Control
 };
 
 inline float dbToGain (float db) { return std::pow (10.0f, db / 20.0f); }
+
 
 /** Chamberlin-style state-variable bandpass (stable to ~fs/6 with oversampled-free tuning) — TPT/ZDF form. */
 struct SVF
@@ -167,7 +175,10 @@ struct HarmonicEngine : Engine
         for (int k = 0; k < kHarm; ++k) tgt[k] = (c.f0 * (k + 1) < sr * 0.45f) ? a * harmonic * c.harm[k] * 1.4f : 0.0f;
         // noise: bands shaped by the decoded noise envelope, scaled to sit under the harmonics
         float mx = -200; for (int b = 0; b < kNoise; ++b) mx = std::max (mx, c.noise[b]);
-        for (int b = 0; b < kNoise; ++b) bgT[b] = dbToGain (c.noise[b] - mx) * a * (1 - harmonic * 0.7f) * (0.35f + character) * 1.6f;
+        // how loud the noise really is (1.1): the analysis gives each band's power per bin, about 31 dB under the
+        // frame's loudness for white noise; a tonal sound's residual sits far lower, and its noise should too
+        const float noiseRel = std::min (1.0f, dbToGain (mx - c.loud + 31));
+        for (int b = 0; b < kNoise; ++b) bgT[b] = dbToGain (c.noise[b] - mx) * noiseRel * a * (1 - harmonic * 0.7f) * (0.35f + character) * 1.6f;
     }
     void render (float* L, float* R, int n) override
     {
@@ -207,6 +218,9 @@ struct PhantomEngine : Engine
         double ws = 0; for (int i = 0; i < N; ++i) ws += win[(size_t) i] * win[(size_t) i];
         norm = (float) (hop / ws);
         ola.assign ((size_t) N * 2, 0); frame.assign (N, 0); X.assign (N / 2 + 1, {}); Xin = X; phase.assign (N / 2 + 1, 0);
+        // random starting phases (1.1): bins that all start at zero phase stay locked together, a click train 30 dB
+        // above its own average level
+        for (auto& p : phase) p = kTwoPi * rnd.uni();
         out.assign ((size_t) hop * 4, 0); outRead = outAvail = 0; inBuf.assign (N, 0);
     }
     void setControl (const Control& c, float character) override
@@ -368,20 +382,20 @@ struct MosaicEngine : Engine
         if (! corpus) return -1;
         const auto& U = corpus->units;
         int best = -1; float bd = 1e30f;
-        std::array<std::pair<float, int>, 16> near; int nn = 0;
+        std::array<std::pair<float, int>, 16> closest; int nn = 0;
         for (int i = 0; i < (int) U.size(); ++i)
         {
             if (! corpus->valid (U[(size_t) i])) continue;
             float d = unitDistance (U[(size_t) i], last, timbre, space);
             if (mode == 2 && cur.idx >= 0 && (size_t) cur.idx < U.size() && U[(size_t) i].start == U[(size_t) cur.idx].start + U[(size_t) cur.idx].len) d *= 0.35f;   // continuity
             if (d < bd) { bd = d; best = i; }
-            if (nn < 16) near[(size_t) nn++] = { d, i };
-            else { auto w = std::max_element (near.begin(), near.end()); if (d < w->first) *w = { d, i }; }
+            if (nn < 16) closest[(size_t) nn++] = { d, i };
+            else { auto w = std::max_element (closest.begin(), closest.end()); if (d < w->first) *w = { d, i }; }
         }
         if (mode == 1 && nn > 0)
         {
-            std::sort (near.begin(), near.begin() + nn);
-            return near[(size_t) (rnd.uni() * std::min ((float) nn, ringK))].second;
+            std::sort (closest.begin(), closest.begin() + nn);
+            return closest[(size_t) (rnd.uni() * std::min ((float) nn, ringK))].second;
         }
         return best;
     }
@@ -557,7 +571,7 @@ struct VoiceEngine : Engine
             const float x = tilt.lp (src);
             float l = 0, r = 0;
             for (int k = 0; k < F; ++k) { l += fg[k] * fm[k][0].bp (x); r += fg[k] * fm[k][1].bp (x); }
-            L[i] += l * amp * 0.16f; R[i] += r * amp * 0.16f;
+            L[i] += l * amp * 0.64f; R[i] += r * amp * 0.64f;     // (1.1: +12 dB, it sat far under the others)
         }
     }
 };
@@ -679,10 +693,481 @@ struct TapeEngine : Engine
     }
 };
 
-enum class Mode { Harmonic, Phantom, Partials, Grains, Mosaic, EarTones, Strings, Voice, Gendy, Table, Tape, Count };
+// ===============================================================================================================
+// 1.1: seven more engines, each a whole model of its own, still driven by the network's decoded Control every hop.
+
+/** a sine table for the engines that run many oscillators (4096 points, linear interpolation: −100 dB) */
+struct SineTable
+{
+    static constexpr int N = 4096;
+    std::array<float, N + 1> t {};
+    SineTable() { for (int i = 0; i <= N; ++i) t[(size_t) i] = (float) std::sin (2.0 * M_PI * i / N); }
+    float operator() (double phase01) const
+    {
+        const double x = (phase01 - std::floor (phase01)) * N; const int i = (int) x; const float f = (float) (x - i);
+        return t[(size_t) i] + (t[(size_t) i + 1] - t[(size_t) i]) * f;
+    }
+    static const SineTable& get() { static const SineTable s; return s; }
+};
+
+/** the strongest peaks of the decoded envelope between lo and hi (Hz), strongest first */
+inline int envelopePeaks (const Control& c, float sr, float lo, float hi, float* hz, float* db, int maxN)
+{
+    struct Pk { float hz, db; };
+    Pk pk[128]; int np = 0;
+    float prev2 = -300, prev = -300, prevHz = 0;
+    const int steps = 360;
+    for (int i = 0; i < steps && np < 128; ++i)
+    {
+        const float f = lo * std::pow (hi / lo, i / (float) (steps - 1)), d = envAt (c, f, sr);
+        if (i > 1 && prev > prev2 && prev >= d) pk[np++] = { prevHz, prev };
+        prev2 = prev; prev = d; prevHz = f;
+    }
+    std::sort (pk, pk + np, [] (const Pk& a, const Pk& b) { return a.db > b.db; });
+    const int n = std::min (np, maxN);
+    for (int k = 0; k < n; ++k) { hz[k] = pk[k].hz; db[k] = pk[k].db; }
+    return n;
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+/** modal synthesis (after Mutable Instruments' Rings and the modal tradition): 40 resonant modes, each a complex
+    one-pole (a decaying phasor), tuned to the decoded spectral peaks plus a partial series that `character` bends
+    from a string's (k) to a free bar's / bell's (inharmonic). Struck by onsets, stirred by the decoded noise. */
+struct ModalEngine : Engine
+{
+    static constexpr int M = 40;
+    float fr[M] {}, frT[M] {}, g[M] {}, gT[M] {}, pan[M] {}; float re[M] {}, im[M] {}, cr[M] {}, ci[M] {}, rad[M] {};
+    float t60 = 1.5f, strike = 0, stir = 0, stirT = 0; bool onset = false; Rand rnd; SVF exLp;
+    void prepare (float s) override
+    {
+        Engine::prepare (s); exLp.set (3000, 0.7f, s);
+        for (int m = 0; m < M; ++m) { fr[m] = frT[m] = 100.0f * (m + 1); pan[m] = (m % 2 ? 1 : -1) * (0.2f + 0.6f * rnd.uni()); re[m] = im[m] = 0; }
+    }
+    void setControl (const Control& c, float character) override
+    {
+        float phz[16], pdb[16];
+        const int np = envelopePeaks (c, sr, 60, std::min (12000.0f, sr * 0.42f), phz, pdb, 16);
+        float mx = -300; for (int k = 0; k < np; ++k) mx = std::max (mx, pdb[k]);
+        // free-free bar ratios (Rayleigh): the inharmonic end of the knob
+        static const float bar[] = { 1.0f, 2.756f, 5.404f, 8.933f, 13.34f, 18.64f, 24.81f, 31.87f, 39.81f, 48.63f, 58.33f, 68.91f };
+        const float base = std::clamp (c.f0 > 30 ? c.f0 : 110.0f, 40.0f, 1500.0f);
+        for (int m = 0; m < M; ++m)
+        {
+            float hz, db;
+            if (m < np && m < 16) { hz = phz[m]; db = pdb[m] - mx; }
+            else
+            {
+                const int k = m - std::min (np, 16);
+                const float harm = (float) (k + 1), inh = k < 12 ? bar[k] : bar[11] + (k - 11) * 10.7f;
+                hz = base * (harm + (inh - harm) * character);
+                db = envAt (c, hz, sr) - std::max (mx, envAt (c, base, sr)) - 3.0f * k * (1 - character * 0.5f);
+            }
+            frT[m] = std::clamp (hz, 30.0f, sr * 0.45f);
+            gT[m] = dbToGain (std::max (-80.0f, db)) * (m < np ? 1.0f : 0.6f);
+        }
+        // decay: longer for tonal, steady sound; character rings longer (bells)
+        t60 = std::clamp (0.25f + 3.5f * c.voicing * (1 - c.flatness) + 4.0f * character, 0.15f, 8.0f);
+        if (c.onset) { onset = true; strike = dbToGain (c.loud + 12) * c.gate; }
+        stirT = dbToGain (c.loud - 2) * c.gate * (0.15f + 0.6f * std::clamp (c.flatness * 2, 0.0f, 1.0f));
+    }
+    void render (float* L, float* R, int n) override
+    {
+        const float sm = 1 - std::exp (-1.0f / (0.02f * sr));
+        for (int m = 0; m < M; ++m)
+        {
+            fr[m] += (frT[m] - fr[m]) * std::min (1.0f, sm * n);
+            const float w = kTwoPi * fr[m] / sr;
+            // higher modes die faster (as in real bodies): T60 falls with frequency
+            const float t = t60 / (1 + fr[m] / 2500.0f);
+            rad[m] = std::exp (-6.9078f / (t * sr));
+            cr[m] = rad[m] * std::cos (w); ci[m] = rad[m] * std::sin (w);
+        }
+        float nrm[M]; for (int m = 0; m < M; ++m) nrm[m] = std::sqrt (std::max (1e-6f, 1 - rad[m] * rad[m]));
+        for (int i = 0; i < n; ++i)
+        {
+            stir += (stirT - stir) * sm;
+            // two excitations: a strike (an impulse, full strength into every mode) and a stir of filtered noise
+            // (normalised per mode by its bandwidth, so long-ringing modes don't pile up)
+            const float nz = exLp.lp (rnd.bi()) * stir * 0.5f;
+            float imp = 0; if (onset) { imp = strike * 0.35f; onset = false; }
+            float l = 0, r = 0;
+            for (int m = 0; m < M; ++m)
+            {
+                g[m] += (gT[m] - g[m]) * sm;
+                // y = r e^{iw} y + x  (a stable decaying phasor)
+                const float x = (imp + nz * nrm[m]) * g[m];
+                const float nr = re[m] * cr[m] - im[m] * ci[m] + x;
+                const float ni = re[m] * ci[m] + im[m] * cr[m];
+                re[m] = nr; im[m] = ni;
+                l += ni * (1 - pan[m]); r += ni * (1 + pan[m]);
+            }
+            L[i] += l * 0.5f; R[i] += r * 0.5f;
+        }
+        for (int m = 0; m < M; ++m) if (! std::isfinite (re[m]) || ! std::isfinite (im[m])) re[m] = im[m] = 0;
+    }
+};
+
+// ---------------------------------------------------------------------------------------------------------------
+/** a struck membrane: a 2-D finite-difference wave equation on a 14 x 14 grid with clamped edges (after Bilbao),
+    run at a rate that tunes its fundamental to the decoded pitch, with tension modulation (a hard strike bends the
+    pitch up, like a tom), struck on onsets at a point the latent chooses, read by two pickups. */
+struct MembraneEngine : Engine
+{
+    static constexpr int G = 14;
+    float u0[G + 2][G + 2] {}, u1[G + 2][G + 2] {}, u2[G + 2][G + 2] {};
+    double sub = 0; float c2 = 0.4f, loss = 0.0005f, f0 = 110, amp = 0, strikeX = 0.3f, strikeY = 0.4f, energy = 0;
+    float prevOutL = 0, prevOutR = 0, curOutL = 0, curOutR = 0, meshRate = 3000; bool hit = false; float hitAmp = 0;
+    Rand rnd; SVF lpL, lpR; float stir = 0, stirT = 0;
+    void prepare (float s) override { Engine::prepare (s); lpL.set (s * 0.2f, 0.7f, s); lpR.set (s * 0.2f, 0.7f, s); }
+    void setControl (const Control& c, float character) override
+    {
+        f0 = std::clamp (c.f0 > 30 ? c.f0 : f0, 40.0f, 1600.0f);
+        // the (1,1) mode of a square membrane: f = c·fs_mesh·√2 / (2 (G+1)), with c = √c2
+        const float want = f0 * 2.0f * (G + 1) / (std::sqrt (0.45f) * 1.41421356f);
+        meshRate = std::min (want, sr);
+        c2 = std::clamp (0.45f * std::pow (want / meshRate, 2.0f), 0.01f, 0.49f);
+        loss = 0.00005f + 0.004f * (1 - character) * (1 - c.voicing * 0.5f);
+        strikeX = 0.2f + 0.6f * (0.5f + 0.5f * std::tanh (c.z[0])); strikeY = 0.2f + 0.6f * (0.5f + 0.5f * std::tanh (c.z[1]));
+        if (c.onset) { hit = true; hitAmp = dbToGain (c.loud + 10) * c.gate; }
+        stirT = dbToGain (c.loud - 6) * c.gate * std::clamp (c.flatness * 3, 0.0f, 1.0f);
+        const float cut = std::min (meshRate * 0.45f, sr * 0.45f);
+        lpL.set (cut, 0.7f, sr); lpR.set (cut, 0.7f, sr);
+    }
+    void step()
+    {
+        // tension modulation: the energy stored raises the wave speed (pitch glide on hard hits)
+        const float cc = std::min (0.49f, c2 * (1 + 2.5f * std::min (1.0f, energy)));
+        float e = 0;
+        for (int x = 1; x <= G; ++x)
+            for (int y = 1; y <= G; ++y)
+            {
+                const float lap = u1[x + 1][y] + u1[x - 1][y] + u1[x][y + 1] + u1[x][y - 1] - 4 * u1[x][y];
+                float v = (2 * u1[x][y] - (1 - loss) * u2[x][y] + cc * lap) / (1 + loss);
+                if (! std::isfinite (v)) v = 0;
+                u0[x][y] = v; e += v * v;
+            }
+        energy = std::sqrt (e / (G * G)) * 4;
+        std::memcpy (u2, u1, sizeof (u1)); std::memcpy (u1, u0, sizeof (u0));
+    }
+    void render (float* L, float* R, int n) override
+    {
+        const double inc = meshRate / sr;
+        for (int i = 0; i < n; ++i)
+        {
+            stir += (stirT - stir) * 0.001f;
+            sub += inc;
+            while (sub >= 1)
+            {
+                sub -= 1;
+                if (hit)
+                {
+                    // a raised-cosine strike, 3 x 3 cells around the latent's point
+                    const int cx = 1 + (int) (strikeX * (G - 1)), cy = 1 + (int) (strikeY * (G - 1));
+                    for (int dx = -1; dx <= 1; ++dx) for (int dy = -1; dy <= 1; ++dy)
+                    {
+                        const int x = std::clamp (cx + dx, 1, G), y = std::clamp (cy + dy, 1, G);
+                        u1[x][y] += hitAmp * (dx == 0 && dy == 0 ? 1.0f : 0.5f) * 0.6f;
+                    }
+                    hit = false;
+                }
+                if (stir > 1e-5f) u1[G / 3][G / 2] += stir * rnd.bi() * 0.05f;
+                step();
+                prevOutL = curOutL; prevOutR = curOutR;
+                curOutL = u1[G / 4 + 1][G / 3 + 1] - u1[G / 2][G - 2];
+                curOutR = u1[G - G / 4][G / 3 + 1] - u1[G / 2 + 1][2];
+            }
+            const float f = (float) sub;
+            const float l = lpL.lp (prevOutL + (curOutL - prevOutL) * f), r = lpR.lp (prevOutR + (curOutR - prevOutR) * f);
+            L[i] += l * 1.2f; R[i] += r * 1.2f;
+        }
+    }
+};
+
+// ---------------------------------------------------------------------------------------------------------------
+/** four-operator FM (Chowning): the modulators' ratios are the decoded harmonic distribution's strongest
+    harmonics, their indices follow brightness and noisiness, op 4 feeds back on itself. `character` moves the
+    algorithm from a stack (4→3→2→1) to two parallel pairs and opens the feedback. Indices are held under
+    Carson's rule so the sidebands stay below Nyquist. */
+struct FMEngine : Engine
+{
+    double ph[4] {}; float ratio[4] { 1, 1, 2, 3 }, ratioT[4] { 1, 1, 2, 3 }, idx[4] {}, idxT[4] {}, f0 = 220, f0T = 220;
+    float amp = 0, ampT = 0, fb = 0, fbT = 0, algo = 0, prev4 = 0, prev4b = 0, detune = 1.003f;
+    void setControl (const Control& c, float character) override
+    {
+        f0T = std::clamp (c.f0 > 30 ? c.f0 : f0T, 30.0f, 4000.0f);
+        int best[3] = { 1, 2, 3 }; float bv[3] = { -1, -1, -1 };
+        for (int k = 1; k < 16; ++k)
+        {
+            const float v = c.harm[k];
+            if (v > bv[0]) { bv[2] = bv[1]; best[2] = best[1]; bv[1] = bv[0]; best[1] = best[0]; bv[0] = v; best[0] = k; }
+            else if (v > bv[1]) { bv[2] = bv[1]; best[2] = best[1]; bv[1] = v; best[1] = k; }
+            else if (v > bv[2]) { bv[2] = v; best[2] = k; }
+        }
+        ratioT[0] = 1; ratioT[1] = (float) (best[0] + 1) * 0.5f; ratioT[2] = (float) (best[1] + 1); ratioT[3] = (float) (best[2] + 1) * 0.5f;
+        const float bright = std::clamp ((c.centroid / std::max (60.0f, f0T)) / 8.0f, 0.0f, 1.0f);
+        const float noisy = std::clamp (c.flatness * 3, 0.0f, 1.0f);
+        const float carson = std::max (0.0f, (sr * 0.45f) / (2 * f0T * std::max (1.0f, ratioT[1])) - 1);   // B = 2(I+1)fm < Nyquist
+        idxT[1] = std::min (carson, 0.5f + 4.0f * bright);
+        idxT[2] = std::min (carson, 0.3f + 3.0f * bright * (1 - character * 0.5f));
+        idxT[3] = std::min (carson, 0.2f + 2.5f * noisy + 2 * character);
+        fbT = 0.1f + 0.9f * character * (0.4f + 0.6f * noisy);
+        algo = character;
+        ampT = dbToGain (c.loud + 6) * c.gate;
+    }
+    void render (float* L, float* R, int n) override
+    {
+        const auto& S = SineTable::get();
+        const float sm = 1 - std::exp (-1.0f / (0.01f * sr));
+        for (int i = 0; i < n; ++i)
+        {
+            f0 += (f0T - f0) * sm; amp += (ampT - amp) * sm; fb += (fbT - fb) * sm;
+            for (int k = 0; k < 4; ++k) { ratio[k] += (ratioT[k] - ratio[k]) * sm * 0.2f; idx[k] += (idxT[k] - idx[k]) * sm; }
+            for (int k = 0; k < 4; ++k) { ph[k] += f0 * ratio[k] / sr; if (ph[k] >= 1) ph[k] -= std::floor (ph[k]); }
+            // op 4 with feedback (averaged over two samples: the Yamaha anti-hunting trick)
+            const float o4 = S (ph[3] + fb * 0.5f * (prev4 + prev4b) * 0.25f);
+            prev4b = prev4; prev4 = o4;
+            const float o3 = S (ph[2] + idx[3] * o4 * (1 - algo) * 0.159f);
+            const float o2 = S (ph[1] + idx[2] * o3 * 0.159f);
+            // stack: 4→3→2→1; pair: (2→1) + (4→3 as a second carrier)
+            const float c1 = S (ph[0] + idx[1] * o2 * 0.159f + idx[3] * o4 * algo * 0.159f);
+            const float c2 = S (ph[2] * detune + idx[3] * o4 * 0.159f);
+            const float y = (c1 * (1 - 0.4f * algo) + c2 * 0.4f * algo) * amp * 0.5f;
+            L[i] += y * (1 - 0.15f * algo); R[i] += y * (1 + 0.15f * algo) * (1 - 0.3f * algo) + c2 * 0.3f * algo * amp * 0.5f;
+        }
+    }
+};
+
+// ---------------------------------------------------------------------------------------------------------------
+/** a bowed string: two digital waveguides either side of the bow, joined by a friction (bow) table, after
+    McIntyre, Schumacher & Woodhouse and Smith (as in the STK's Bowed), into three body resonances. Bow velocity is
+    the decoded loudness, bow pressure the noisiness and `character`, bow position the latent. */
+struct BowedEngine : Engine
+{
+    struct Delay { std::vector<float> b; int w = 0; float len = 100;
+        void prepare (int n) { b.assign ((size_t) n, 0); w = 0; }
+        float read() const { const float p = (float) w - len; float fp = std::floor (p); const float f = p - fp; int i = (int) fp; const int N = (int) b.size(); i = ((i % N) + N) % N; return b[(size_t) i] * (1 - f) + b[(size_t) ((i + 1) % N)] * f; }
+        void write (float x) { b[(size_t) w] = x; w = (w + 1) % (int) b.size(); } };
+    Delay neck, bridge; float lp = 0, f0 = 220, f0T = 220, vel = 0, velT = 0, slope = 3, beta = 0.13f, out = 0, dc = 0;
+    SVF body[3]; float bodyG[3] { 1.0f, 0.7f, 0.45f };
+    void prepare (float s) override
+    {
+        Engine::prepare (s); neck.prepare ((int) (s / 20) + 8); bridge.prepare ((int) (s / 20) + 8);
+        const float bf[3] = { 280, 460, 1100 }; for (int k = 0; k < 3; ++k) body[k].set (bf[k], 2.5f, s);
+    }
+    void setControl (const Control& c, float character) override
+    {
+        f0T = std::clamp (c.f0 > 30 ? c.f0 : f0T, 40.0f, 2000.0f);
+        velT = std::clamp (dbToGain (c.loud + 14) * c.gate, 0.0f, 0.95f) * (c.voicing > 0.2f || c.loud > -40 ? 1.0f : 0.3f);
+        slope = 5.0f - 3.0f * std::clamp (c.flatness * 2 + character * 0.5f, 0.0f, 1.0f);      // lower = more pressure, more scratch
+        beta = 0.08f + 0.12f * (0.5f + 0.5f * std::tanh (c.z[2]));
+    }
+    static float bowTable (float x, float slope) { float s = std::abs ((x + 0.001f) * slope) + 0.75f; s = std::pow (s, -4.0f); return std::min (1.0f, s); }
+    void render (float* L, float* R, int n) override
+    {
+        const float sm = 1 - std::exp (-1.0f / (0.02f * sr));
+        for (int i = 0; i < n; ++i)
+        {
+            f0 += (f0T - f0) * sm; vel += (velT - vel) * sm;
+            // string losses lighter for higher notes (a short string still has to sustain the Helmholtz motion);
+            // the loop is shortened by the loss filter's delay at low frequencies, a / (1 - a)
+            const float la = std::clamp (0.75f - 0.22f * std::log2 (std::max (1.0f, f0 / 220.0f)), 0.12f, 0.75f);
+            const float total = std::max (6.0f, sr / f0 - la / (1 - la) + 0.1f);   // (+0.1: measured, tests/EngineCheck)
+            bridge.len = std::max (2.0f, total * beta); neck.len = std::max (2.0f, total - bridge.len);
+            const float nutRefl = -neck.read();
+            lp = la * lp + (1 - la) * bridge.read();                  // string losses
+            const float bridgeRefl = -lp * 0.995f;
+            const float stringVel = bridgeRefl + nutRefl;
+            const float dv = vel * 0.5f - stringVel;
+            const float newVel = dv * bowTable (dv, slope);
+            neck.write (bridgeRefl + newVel);
+            bridge.write (nutRefl + newVel);
+            float y = 0; const float x = bridge.read();
+            for (int k = 0; k < 3; ++k) y += bodyG[k] * body[k].bp (x);
+            y += 0.3f * x;
+            dc += 0.0005f * (y - dc); y -= dc;
+            if (! std::isfinite (y)) { y = 0; neck.prepare ((int) neck.b.size()); bridge.prepare ((int) bridge.b.size()); lp = 0; }
+            L[i] += y * 0.8f; R[i] += y * 0.8f;
+        }
+    }
+};
+
+// ---------------------------------------------------------------------------------------------------------------
+/** scanned synthesis (Verplank, Mathews & Shaw): a ring of 64 masses on springs, each pushed by one band of the
+    decoded mel envelope, moving at haptic rates; the ring's shape is read as a wavetable at the decoded pitch. The
+    network's spectrum shapes a physical object, and the object's slow motion is the timbre. `character` softens
+    the springs and lowers the damping (more motion, more ringing). */
+struct ScannedEngine : Engine
+{
+    static constexpr int K = kMel, TN = 1024;
+    float x[K] {}, v[K] {}, force[K] {}; std::vector<float> tbl[2]; int cur = 0; float xf = 1; double ph = 0;
+    float f0 = 220, f0T = 220, amp = 0, ampT = 0, k1 = 0.2f, k0 = 0.02f, damp = 0.05f, dc = 0;
+    void prepare (float s) override
+    {
+        Engine::prepare (s); for (int i = 0; i < K; ++i) { x[i] = 0.3f * std::sin (kTwoPi * i / K); v[i] = 0; }
+        tbl[0].assign (TN + 1, 0.0f); tbl[1].assign (TN + 1, 0.0f);
+    }
+    void setControl (const Control& c, float character) override
+    {
+        f0T = std::clamp (c.f0 > 30 ? c.f0 : f0T, 30.0f, 3000.0f);
+        ampT = dbToGain (c.loud + 6) * c.gate;
+        float mx = -300; for (int i = 0; i < K; ++i) mx = std::max (mx, c.mel[i]);
+        for (int i = 0; i < K; ++i) force[i] = dbToGain ((c.mel[i] - mx) * 0.5f) * (i % 2 ? -1.0f : 1.0f);
+        k1 = 0.35f - 0.27f * character; k0 = 0.03f; damp = 0.08f - 0.06f * character;
+        // advance the ring: 10 haptic steps per hop (1 kHz)
+        for (int s = 0; s < 10; ++s)
+        {
+            float nx[K];
+            for (int i = 0; i < K; ++i)
+            {
+                const float l = x[(i + K - 1) % K], r = x[(i + 1) % K];
+                const float a = k1 * (l + r - 2 * x[i]) - k0 * x[i] - damp * v[i] + 0.02f * force[i];
+                v[i] += a; nx[i] = x[i] + v[i];
+            }
+            for (int i = 0; i < K; ++i) x[i] = std::isfinite (nx[i]) ? std::clamp (nx[i], -4.0f, 4.0f) : 0.0f;
+        }
+        // its shape as a band-limited table: the ring's harmonics (a 64-point DFT), only those under 0.45 fs at the
+        // pitch it will play (no aliasing), summed into 1024 points
+        const int kmax = std::clamp ((int) (0.45f * sr / std::max (f0T, 1.0f)), 1, K / 2);
+        float ca[K / 2 + 1] {}, cb[K / 2 + 1] {};
+        for (int k = 1; k <= kmax; ++k)
+            for (int i = 0; i < K; ++i) { const float w = kTwoPi * k * i / K; ca[k] += x[i] * std::cos (w); cb[k] += x[i] * std::sin (w); }
+        auto& t = tbl[1 - cur];
+        const auto& S = SineTable::get();
+        float pk = 1e-6f;
+        for (int j = 0; j < TN; ++j)
+        {
+            float y = 0;
+            for (int k = 1; k <= kmax; ++k) { const double p = (double) k * j / TN; y += ca[k] * S (p + 0.25) + cb[k] * S (p); }
+            t[(size_t) j] = y; pk = std::max (pk, std::abs (y));
+        }
+        for (int j = 0; j < TN; ++j) t[(size_t) j] /= pk;
+        t[TN] = t[0];
+        cur = 1 - cur; xf = 0;
+    }
+    float read (const std::vector<float>& t, double p) const { const double q = p * TN; const int i = (int) q; const float f = (float) (q - i); return t[(size_t) i] + (t[(size_t) i + 1] - t[(size_t) i]) * f; }
+    void render (float* L, float* R, int n) override
+    {
+        const float sm = 1 - std::exp (-1.0f / (0.01f * sr)), xs = 1.0f / (0.01f * sr);
+        for (int i = 0; i < n; ++i)
+        {
+            f0 += (f0T - f0) * sm; amp += (ampT - amp) * sm; xf = std::min (1.0f, xf + xs);
+            ph += f0 / sr; if (ph >= 1) ph -= 1;
+            const float y = read (tbl[cur], ph) * xf + read (tbl[1 - cur], ph) * (1 - xf);
+            dc += 0.001f * (y - dc);
+            const float o = (y - dc) * amp * 0.45f;
+            L[i] += o; R[i] += o;
+        }
+    }
+};
+
+// ---------------------------------------------------------------------------------------------------------------
+/** pulsar synthesis (Curtis Roads): a train of pulsarets at the decoded pitch, each a Hann-windowed sinusoid at a
+    formant of the decoded envelope, lasting a duty fraction of the period; two formant channels, left and right.
+    Noisiness masks pulsars at random (stochastic masking); `character` shortens the duty and spreads the formants. */
+struct PulsarEngine : Engine
+{
+    double ph = 0; float f0 = 110, f0T = 110, fmt[2] { 600, 1400 }, fmtT[2] { 600, 1400 }, duty = 0.5f, amp = 0, ampT = 0, mask = 0;
+    bool on = true; Rand rnd;
+    void setControl (const Control& c, float character) override
+    {
+        f0T = std::clamp (c.f0 > 30 ? c.f0 : f0T, 8.0f, 1200.0f);
+        float hz[2], db[2];
+        const int np = envelopePeaks (c, sr, 250, std::min (8000.0f, sr * 0.4f), hz, db, 2);
+        fmtT[0] = np > 0 ? hz[0] : 700; fmtT[1] = np > 1 ? hz[1] * (1 + 0.5f * character) : 1500;
+        for (auto& f : fmtT) f = std::clamp (f, f0T * 1.0f, sr * 0.4f);
+        duty = std::clamp (0.9f - 0.75f * character, 0.08f, 0.95f);
+        mask = std::clamp (c.flatness * 2.5f, 0.0f, 0.85f);
+        ampT = dbToGain (c.loud + 8) * c.gate;
+    }
+    void render (float* L, float* R, int n) override
+    {
+        const auto& S = SineTable::get();
+        const float sm = 1 - std::exp (-1.0f / (0.01f * sr));
+        for (int i = 0; i < n; ++i)
+        {
+            f0 += (f0T - f0) * sm; amp += (ampT - amp) * sm; for (int k = 0; k < 2; ++k) fmt[k] += (fmtT[k] - fmt[k]) * sm;
+            const double prev = ph; ph += f0 / sr;
+            if (ph >= 1) { ph -= 1; on = rnd.uni() >= mask; }
+            (void) prev;
+            float l = 0, r = 0;
+            if (on && ph < duty)
+            {
+                const float u = (float) (ph / duty);                         // 0..1 through the pulsaret
+                const float w = 0.5f - 0.5f * std::cos (kTwoPi * u);
+                // the pulsaret's own phase: formant cycles since it began (so every pulsaret starts at zero phase)
+                const double t = ph / f0;                                    // seconds into the period
+                l = w * S (t * fmt[0]); r = w * S (t * fmt[1]);
+            }
+            L[i] += (0.8f * l + 0.2f * r) * amp * 0.6f; R[i] += (0.2f * l + 0.8f * r) * amp * 0.6f;
+        }
+    }
+};
+
+// ---------------------------------------------------------------------------------------------------------------
+/** a swarm (after Reynolds' boids and Blackwell's swarm music): 48 partials fly in log-frequency, each drawn up the
+    slope of the decoded spectral envelope toward its peaks, kept apart from its neighbours, aligning with their
+    motion; loudness = the envelope where they are. `character` is the turbulence (how freely they wander). */
+struct SwarmEngine : Engine
+{
+    static constexpr int B = 48;
+    float pos[B] {}, vel[B] {}, amp[B] {}, ampT[B] {}, pan[B] {}; double ph[B] {}; Rand rnd; float level = 0, levelT = 0;
+    float lo = 0, hi = 0;
+    void prepare (float s) override
+    {
+        Engine::prepare (s); lo = std::log2 (60.0f); hi = std::log2 (std::min (12000.0f, s * 0.42f));
+        for (int b = 0; b < B; ++b) { pos[b] = lo + (hi - lo) * (b + 0.5f) / B; vel[b] = 0; pan[b] = rnd.bi() * 0.8f; }
+    }
+    void setControl (const Control& c, float character) override
+    {
+        levelT = dbToGain (c.loud + 6) * c.gate;
+        float mx = -300; for (int i = 0; i < kMel; ++i) mx = std::max (mx, c.mel[i]);
+        std::array<float, B> order; for (int b = 0; b < B; ++b) order[(size_t) b] = pos[b];
+        for (int b = 0; b < B; ++b)
+        {
+            const float hz = std::exp2 (pos[b]);
+            // cohesion: up the envelope's slope (a finite difference over a third of an octave)
+            const float d = (envAt (c, std::exp2 (pos[b] + 0.15f), sr) - envAt (c, std::exp2 (pos[b] - 0.15f), sr)) / 0.3f;
+            float acc = 0.0025f * std::clamp (d, -30.0f, 30.0f);
+            // separation and alignment with the nearest neighbours
+            for (int o = 0; o < B; ++o)
+            {
+                if (o == b) continue;
+                const float dx = pos[b] - pos[o];
+                if (std::abs (dx) < 0.12f) { acc += 0.004f * (dx > 0 ? 1 : -1) * (0.12f - std::abs (dx)) / 0.12f; acc += 0.02f * (vel[o] - vel[b]) / B; }
+            }
+            acc += character * 0.03f * rnd.bi();
+            vel[b] = std::clamp ((vel[b] + acc) * 0.9f, -0.2f, 0.2f);
+            pos[b] = std::clamp (pos[b] + vel[b], lo, hi);
+            ampT[b] = dbToGain ((envAt (c, hz, sr) - mx) * 0.8f) / B * 6;
+        }
+    }
+    void render (float* L, float* R, int n) override
+    {
+        const auto& S = SineTable::get();
+        const float sm = 1 - std::exp (-1.0f / (0.02f * sr));
+        float hz[B]; for (int b = 0; b < B; ++b) hz[b] = std::exp2 (pos[b]);
+        for (int i = 0; i < n; ++i)
+        {
+            level += (levelT - level) * sm;
+            float l = 0, r = 0;
+            for (int b = 0; b < B; ++b)
+            {
+                amp[b] += (ampT[b] - amp[b]) * sm;
+                ph[b] += hz[b] / sr; if (ph[b] >= 1) ph[b] -= 1;
+                const float y = amp[b] * S (ph[b]);
+                l += y * (1 - pan[b]); r += y * (1 + pan[b]);
+            }
+            L[i] += l * level; R[i] += r * level;
+        }
+    }
+};
+
+enum class Mode { Harmonic, Phantom, Partials, Grains, Mosaic, EarTones, Strings, Voice, Gendy, Table, Tape,
+                  Modal, Membrane, FM, Bowed, Scanned, Pulsar, Swarm, Count };
 inline const char* modeName (int m)
 {
-    static const char* n[] = { "harmonic", "phantom", "partials", "grains", "mosaic", "ear tones", "strings", "voice", "gendy", "table", "tape" };
+    static const char* n[] = { "harmonic", "phantom", "partials", "grains", "mosaic", "ear tones", "strings", "voice", "gendy", "table", "tape",
+                               "modal", "membrane", "fm", "bowed", "scanned", "pulsar", "swarm" };
     return n[m];
 }
 inline const char* modeLineage (int m)
@@ -690,7 +1175,11 @@ inline const char* modeLineage (int m)
     static const char* n[] = { "DDSP harmonic + noise", "magnitude-only resynthesis: the network's artefacts", "inharmonic additive peaks · Partials",
                                "granular recall by Hopfield attention · Cloudfin", "concatenative point / ring / path · Coalescence",
                                "difference-tone primaries · Oneirophone", "sympathetic strings + jawari · Tantri", "glottal source through formants · Spreekbuis",
-                               "dynamic stochastic synthesis · Xenakis", "wavetable from the decoded spectrum · disting EX", "skipping micro-loops and dust · openprocess / Oval" };
+                               "dynamic stochastic synthesis · Xenakis", "wavetable from the decoded spectrum · disting EX", "skipping micro-loops and dust · openprocess / Oval",
+                               "40 resonant modes, string to bell · Rings", "struck 2-D membrane, tension bends the pitch · Bilbao",
+                               "four operators, ratios from the harmonics · Chowning", "bowed waveguide string with friction · McIntyre / Smith",
+                               "a ring of masses pushed by the spectrum · Verplank", "pulsarets at the formants · Roads",
+                               "48 partials flocking to the peaks · Reynolds / Blackwell" };
     return n[m];
 }
 
@@ -784,14 +1273,23 @@ struct Synth
     static constexpr int kLayers = 4;
     HarmonicEngine harmonic; PhantomEngine phantom; PartialsEngine partials; GrainEngine grains; MosaicEngine mosaic;
     EarToneEngine ear; StringsEngine strings; VoiceEngine voice; GendyEngine gendy; TableEngine table; TapeEngine tape;
-    Engine* all[(int) Mode::Count] { &harmonic, &phantom, &partials, &grains, &mosaic, &ear, &strings, &voice, &gendy, &table, &tape };
+    ModalEngine modal; MembraneEngine membrane; FMEngine fm; BowedEngine bowed; ScannedEngine scanned; PulsarEngine pulsar; SwarmEngine swarm;
+    Engine* all[(int) Mode::Count] { &harmonic, &phantom, &partials, &grains, &mosaic, &ear, &strings, &voice, &gendy, &table, &tape,
+                                     &modal, &membrane, &fm, &bowed, &scanned, &pulsar, &swarm };
     struct Layer { int mode = 0; bool on = false; float level = 1, pan = 0, character = 0.3f; };
     std::array<Layer, kLayers> layers;
     std::array<std::vector<float>, kLayers> bufL, bufR;
     SpectralCombiner specL, specR;
     float lastW[kLayers] {};
+    float layerPeak[kLayers] {};       // each layer's peak this block, after its level (the gain page)
+    // level matching (gain staging): each engine has its own idea of loud; every layer's loudness is steered to the
+    // loudness the network decodes, over about 300 ms, so any engine sits where the input does and follows its
+    // dynamics. Only moves while there is sound to match (decays ring out on their own); never boosts near-silence.
+    bool matchLevels = true;
+    float targetDb = -60, layerMs[kLayers] {}, corrDb[kLayers] {}, sampleRate = 48000;
     void prepare (float sr, int maxBlock, Corpus* corpus)
     {
+        sampleRate = sr; for (int l = 0; l < kLayers; ++l) { layerMs[l] = 0; corrDb[l] = 0; }
         for (auto* e : all) e->prepare (sr);
         grains.corpus = mosaic.corpus = tape.corpus = corpus;
         for (auto& b : bufL) b.assign ((size_t) maxBlock, 0); for (auto& b : bufR) b.assign ((size_t) maxBlock, 0);
@@ -805,7 +1303,28 @@ struct Synth
     }
     void setControl (const Control& c)
     {
+        targetDb = c.loud;
         for (int l = 0; l < kLayers; ++l) if (layerLive (l)) all[layers[(size_t) l].mode]->setControl (c, layers[(size_t) l].character);
+    }
+    /** one layer's engine into bufL / bufR[l] (cleared first), level-matched */
+    void renderLayer (int l, int n)
+    {
+        std::fill (bufL[(size_t) l].begin(), bufL[(size_t) l].begin() + n, 0.0f); std::fill (bufR[(size_t) l].begin(), bufR[(size_t) l].begin() + n, 0.0f);
+        if (! layerLive (l)) return;
+        all[layers[(size_t) l].mode]->render (bufL[(size_t) l].data(), bufR[(size_t) l].data(), n);
+        double e = 0;
+        for (int i = 0; i < n; ++i) e += 0.5 * (bufL[(size_t) l][(size_t) i] * bufL[(size_t) l][(size_t) i] + bufR[(size_t) l][(size_t) i] * bufR[(size_t) l][(size_t) i]);
+        const float a = 1 - std::exp (-(float) n / (0.3f * sampleRate));
+        layerMs[l] += a * ((float) (e / std::max (1, n)) - layerMs[l]);
+        if (! matchLevels) { corrDb[l] = 0; return; }
+        const float levelDb = 10 * std::log10 (layerMs[l] + 1e-20f);
+        if (targetDb > -50 && levelDb > -90)
+        {
+            const float want = std::clamp (targetDb - levelDb, -24.0f, 18.0f);
+            corrDb[l] += (want - corrDb[l]) * std::min (1.0f, (float) n / (0.3f * sampleRate));
+        }
+        const float g = dbToGain (corrDb[l]);
+        if (std::abs (corrDb[l]) > 0.01f) for (int i = 0; i < n; ++i) { bufL[(size_t) l][(size_t) i] *= g; bufR[(size_t) l][(size_t) i] *= g; }
     }
     /** morph weights: equal-power crossfade along the live layers at position m (0..1) */
     void morphWeights (float m, float* w) const
@@ -819,15 +1338,16 @@ struct Synth
     /** render n samples into outL/outR (added). latency of the spectral modes: SpectralCombiner::N samples */
     void render (float* outL, float* outR, int n, Combine mode, float morph)
     {
-        for (int l = 0; l < kLayers; ++l)
-        {
-            std::fill (bufL[(size_t) l].begin(), bufL[(size_t) l].begin() + n, 0.0f); std::fill (bufR[(size_t) l].begin(), bufR[(size_t) l].begin() + n, 0.0f);
-            if (! layerLive (l)) continue;
-            all[layers[(size_t) l].mode]->render (bufL[(size_t) l].data(), bufR[(size_t) l].data(), n);
-        }
+        for (int l = 0; l < kLayers; ++l) renderLayer (l, n);
         float w[kLayers];
         if (mode == Combine::Stack) for (int l = 0; l < kLayers; ++l) w[l] = layerLive (l) ? 1.0f : 0.0f;
         else morphWeights (morph, w);
+        for (int l = 0; l < kLayers; ++l)
+        {
+            float pk = 0; const float g = layers[(size_t) l].level;
+            if (layerLive (l)) for (int i = 0; i < n; ++i) pk = std::max (pk, std::max (std::abs (bufL[(size_t) l][(size_t) i]), std::abs (bufR[(size_t) l][(size_t) i])) * g);
+            layerPeak[l] = pk;
+        }
         if (mode == Combine::Imprint)   // the first live layer is the envelope; the morph moves between the others
         {
             int first = -1; for (int l = 0; l < kLayers; ++l) if (layerLive (l)) { first = l; break; }
@@ -877,11 +1397,7 @@ struct Synth
     {
         for (int l = 0; l < kLayers; ++l) { std::fill (Ls[l], Ls[l] + n, 0.0f); std::fill (Rs[l], Rs[l] + n, 0.0f); }
         if (mode == Combine::Merge || mode == Combine::Imprint) { render (Ls[0], Rs[0], n, mode, morph); return; }
-        for (int l = 0; l < kLayers; ++l)
-        {
-            std::fill (bufL[(size_t) l].begin(), bufL[(size_t) l].begin() + n, 0.0f); std::fill (bufR[(size_t) l].begin(), bufR[(size_t) l].begin() + n, 0.0f);
-            if (layerLive (l)) all[layers[(size_t) l].mode]->render (bufL[(size_t) l].data(), bufR[(size_t) l].data(), n);
-        }
+        for (int l = 0; l < kLayers; ++l) renderLayer (l, n);
         float w[kLayers];
         if (mode == Combine::Stack) for (int l = 0; l < kLayers; ++l) w[l] = layerLive (l) ? 1.0f : 0.0f;
         else morphWeights (morph, w);

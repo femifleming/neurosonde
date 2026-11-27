@@ -21,6 +21,7 @@ P = "page3"  # patch notes
 C = "page4"  # corpus
 SP = "space/page5"  # space (NeuroSpaceTest)
 L = "page6"  # lab
+G = "page7"  # gain staging (1.1)
 
 MAP = (408, 106, 464, 464)          # the 16 x 16 SOM grid
 HUD = (420, 640, 440, 128)
@@ -54,6 +55,48 @@ CHAPTERS = [
              marks=[(1086, 6, 182, 18, "learning or sleeping / steps / frames", "s")],
              say="There is one brain, shared by every instance in a host. Other processes, like the standalone app, "
                  "merge their learning into it through a brain file. Everything it hears teaches the same network."),
+    ]),
+
+    dict(title="hearing it", sub="real sound through the real plug-in: a fresh brain, in real time", kind="demo", segs=[
+        dict(demo="01", play=["in"], point="the input",
+             say="Before the tour, listen. This is what goes in: a spoken phrase. Every sound in this chapter is the real "
+                 "plug-in, starting from an empty brain, fed in real time."),
+        dict(demo="02", play=["out"], point="an empty brain",
+             say="Its first hearing. The network knows nothing yet, so the engine follows the analysis, frame by frame: "
+                 "pitch, loudness, the spectrum. A rough sketch of the voice."),
+        dict(demo="03", play=["in", "out"], point="after a minute of listening",
+             say="After about eighty seconds of listening it has trained for thousands of steps, and now every frame "
+                 "goes through its sixteen numbers and back out. First the phrase as it went in, then as the network "
+                 "rebuilds it."),
+        dict(demo="04", play=["out"], point="lucidity 0: it dreams",
+             say="Turn lucidity down to zero and it stops following the input. The recurrent network dreams forward from "
+                 "what it has learned, here at a higher temperature."),
+        dict(demo="05", play=["out"], point="grains: remembered moments",
+             say="The grains engine plays back remembered moments of what it heard, chosen by Hopfield attention to "
+                 "where the network is now."),
+        dict(demo="06", play=["in", "out"], point="a new sound, learning paused",
+             say="Now a different sound, a plucked melody, with learning paused. The network can only answer with what "
+                 "it knows, so the pluck comes back shaped by the voice."),
+        dict(demo="07", play=["out"], point="bowed (new in 1.1)",
+             say="New in one point one: seven more engines. Bowed is a waveguide string with bow friction and a wooden "
+                 "body; the network's loudness is the bow speed."),
+        dict(demo="08", play=["out"], point="modal",
+             say="Modal rings forty resonant modes tuned to the decoded spectrum. With the character turned up, they "
+                 "spread into the inharmonic ratios of a bell."),
+        dict(demo="09", play=["out"], point="membrane",
+             say="Membrane is a struck drum skin, simulated in two dimensions. Every onset strikes it at a point the "
+                 "latent space chooses, and a hard hit bends the pitch."),
+        dict(demo="10", play=["out"], point="scanned",
+             say="Scanned synthesis: a ring of sixty-four masses on springs, each pushed by one band of the decoded "
+                 "spectrum. Its slowly moving shape is the waveform."),
+        dict(demo="11", play=["out"], point="swarm",
+             say="Swarm: forty-eight partials flocking in frequency, drawn to the peaks of the decoded spectrum and "
+                 "kept apart from each other."),
+        dict(demo="12", play=["out"], point="two layers, morphed",
+             say="Layers combine. Here modal and swarm, morphed halfway."),
+        dict(demo="13", play=["out"], point="a preset: hydrophone",
+             say="And a preset, hydrophone, on the same phrase. Every clip here stayed under the output ceiling: the "
+                 "new gain page shows each stage."),
     ]),
 
     dict(title="constellation", sub="the main page: the self-organising map, drawn as it is", segs=[
@@ -114,11 +157,12 @@ CHAPTERS = [
                     (146, 94, 124, 26, "character", "s")],
              say="On the left, the layers. Each has an on switch, an engine, a level and a character, which every engine "
                  "reads in its own way: phase scatter, inharmonicity, grain density, the strings' bridge."),
-        dict(shot=S, focus=(10, 36, 270, 290), point="eleven engines",
+        dict(shot=S, focus=(10, 36, 270, 290), point="eighteen engines",
              marks=[(57, 62, 212, 28, "harmonic: ddsp", "e"), (57, 122, 212, 28, "grains: cloudfin", "e"),
                     (57, 182, 212, 28, "strings: tantri", "e"), (57, 242, 212, 28, "phantom", "e")],
-             say="Click an engine to choose one of eleven: harmonic, phantom, partials, grains, mosaic, ear tones, "
-                 "strings, voice, gendy, table and tape."),
+             say="Click an engine to choose one of eighteen: harmonic, phantom, partials, grains, mosaic, ear tones, "
+                 "strings, voice, gendy, table and tape, and, new in one point one, modal, membrane, F.M., bowed, "
+                 "scanned, pulsar and swarm."),
         dict(shot=S, focus=(14, 296, 262, 84), point="stack, morph, merge, imprint",
              marks=[(118, 304, 150, 18, "combine", "n"), (118, 358, 150, 18, "morph by", "s")],
              say="The layers combine by stack; by morph; by merge, a spectral log-magnitude interpolation; or by imprint, "
@@ -187,6 +231,13 @@ CHAPTERS = [
              say="Partials are inharmonic additive peaks. Mosaic is concatenative, by point, ring or path. Ear tones "
                  "make difference tones. Voice is a glottal source through formants. Gendy is Xenakis's dynamic "
                  "stochastic synthesis. Table is a wavetable from the decoded spectrum. And tape skips micro-loops, with dust."),
+        dict(shot=S, focus=(14, 56, 262, 250), point="seven more, new in 1.1",
+             marks=[(57, 62, 212, 28, "modal, membrane, fm, bowed ...", "e")],
+             say="New in one point one, seven more, each a whole model. Modal: forty resonant modes, from a string to a "
+                 "bell. Membrane: a struck drum skin, simulated in two dimensions. F.M.: four operators whose ratios "
+                 "come from the decoded harmonics. Bowed: a waveguide string with bow friction and a body. Scanned: a "
+                 "ring of masses pushed by the spectrum, read as a wavetable. Pulsar: trains of pulsarets at the "
+                 "formants. And swarm: partials flocking to the spectrum's peaks."),
         dict(shot=Y, focus=(10, 40, 306, 362), point="layers: level, pan, character",
              marks=[(18, 70, 100, 26, "layer on", "e"), (18, 108, 292, 26, "level", "e"), (18, 148, 292, 26, "pan", "e"),
                     (18, 188, 292, 26, "character", "e")],
@@ -208,6 +259,39 @@ CHAPTERS = [
              say="Spectral, stargate and nebula: imprint, tilt, the stereo width and spin, and the nebula, a feedback "
                  "delay network reverb, with its decay. Input and output: input gain, gate, dry and wet, output level, "
                  "and how strongly the patch notes act on the sound."),
+    ]),
+
+    dict(title="gain staging", sub="new in 1.1: every stage metered, and the output can't clip", segs=[
+        dict(shot=G, focus=None, point="the gain page",
+             marks=[(320, 40, 640, 734, "the meters", "s")],
+             say="New in one point one: the gain page. Left: the input and the layers. In the middle, the signal at every "
+                 "stage. Right: the output and the limiter."),
+        dict(shot=G, focus=(320, 40, 640, 734), point="a meter at every stage",
+             marks=[(392, 84, 36, 540, "input", "w"), (458, 84, 236, 540, "the four layers", "n"),
+                    (722, 84, 36, 540, "synthesis", "n"), (788, 84, 36, 540, "to the limiter", "n"), (852, 84, 36, 540, "output", "e")],
+             say="Each stage has a peak meter from minus sixty to plus six decibels, with its peak held: the input after "
+                 "its gain, each layer, the synthesis after the output gain, what reaches the limiter, and what leaves. "
+                 "The dashed line is the ceiling."),
+        dict(shot=G, focus=(320, 660, 640, 110), point="headroom, reduction, overs",
+             marks=[(334, 676, 600, 18, "limiter, ceiling, look-ahead, gain reduction", "n"),
+                    (334, 716, 600, 18, "overs: before the limiter / at the output", "s")],
+             say="Below, the numbers: the limiter, the ceiling and its look-ahead, the gain reduction, the output peak and "
+                 "its headroom, loudness in and out, and two counts of overs: samples that reached the limiter above the "
+                 "ceiling, and samples that left above zero decibels. With the limiter on, that second count stays at zero. "
+                 "Click to reset."),
+        dict(shot=G, focus=(970, 40, 300, 280), point="ceiling, limiter, auto gain",
+             marks=[(978, 160, 284, 30, "ceiling", "w"), (978, 210, 284, 26, "clean / soft", "w"),
+                    (978, 242, 110, 28, "auto gain", "s")],
+             say="The ceiling, minus one decibel by default. The limiter looks one point three milliseconds ahead, so "
+                 "nothing passes the ceiling and the gain never steps: clean is transparent, and soft saturates into the "
+                 "ceiling first. It can't be switched off. Auto gain brings the synthesis to the input's loudness over a "
+                 "few seconds."),
+        dict(shot=G, focus=(10, 40, 300, 320), point="match engine levels",
+             marks=[(18, 74, 284, 32, "input gain", "e"), (18, 120, 284, 170, "layer levels", "e"),
+                    (18, 304, 190, 28, "match engine levels", "e")],
+             say="And every engine is now matched to the loudness the network decodes, so any engine sits where the input "
+                 "does and follows its dynamics. The footer of every page shows the output peak, and whether anything "
+                 "clipped."),
     ]),
 
     dict(title="patch notes", sub="what the notes say | the notes | journal", segs=[
@@ -366,6 +450,7 @@ CHAPTERS = [
              say="And memories are named snapshots of the brain to go back to, the way Empty Set built tracks from "
                  "earlier, rougher stages."),
         dict(shot=S, focus=None, point="neurosonde", marks=[],
-             say="That is neurosonde: a network that learns from what it hears, and plays it back."),
+             say="That is neurosonde, version one point one, for the Mac, Windows and Linux: a network that learns from "
+                 "what it hears, and plays it back."),
     ]),
 ]

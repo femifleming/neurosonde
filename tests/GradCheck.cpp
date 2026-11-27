@@ -53,12 +53,23 @@ int main()
             const size_t pi = pick() % v.ps.list.size(); Param* p = v.ps.list[pi];
             const size_t i = pick() % p->size();
             size_t off = 0; for (size_t q = 0; q < pi; ++q) off += v.ps.list[q]->size();
-            const float a = g[off + i], w0 = p->w[i], h = 2e-3f;
-            p->w[i] = w0 + h; const double lp = loss (false);
-            p->w[i] = w0 - h; const double lm = loss (false); p->w[i] = w0;
-            const double num = (lp - lm) / (2 * h);
-            if (std::abs (num) + std::abs (a) < 1e-5) continue;
-            worst = std::max (worst, std::abs (num - a) / (std::abs (num) + std::abs (a)));
+            const float a = g[off + i], w0 = p->w[i];
+            // central differences at three steps: a LeakyReLU kink inside the step spoils the big ones, float
+            // rounding the small one; the gradient must agree with at least one of them
+            double rel = 1e9, num = 0;
+            for (float h : { 2e-3f, 1e-3f, 5e-4f })
+            {
+                p->w[i] = w0 + h; const double lp = loss (false);
+                p->w[i] = w0 - h; const double lm = loss (false); p->w[i] = w0;
+                const double nh = (lp - lm) / (2 * h);
+                // below ~1e-4 a float central difference can't resolve the gradient (the loss is O(1), float carries 7
+                // digits, the steps are 5e-4 to 2e-3): nothing to compare
+                if (std::abs (nh) + std::abs (a) < 1e-4) { rel = 0; num = nh; break; }
+                const double r = std::abs (nh - a) / (std::abs (nh) + std::abs (a));
+                if (r < rel) { rel = r; num = nh; }
+            }
+            if (rel > 0.03) std::printf ("    vae param %zu idx %zu: analytic %.6g numeric %.6g (rel %.3f)\n", pi, i, (double) a, num, rel);
+            worst = std::max (worst, rel);
         }
         CHECK (worst < 0.05, "VAE + FiLM + heads + KL gradients match finite differences (worst rel err %.4f), %zu params", worst, v.ps.count());
     }
@@ -148,13 +159,13 @@ int main()
         SOM m; m.init (1);
         for (int t = 0; t < 20000; ++t) { float z[kZ] = {}; z[0] = std::uniform_real_distribution<float> (-1, 1) (rng); z[1] = std::uniform_real_distribution<float> (-1, 1) (rng); m.learn (z); }
         // topology: neighbours on the map are close in latent space
-        double near = 0, far = 0;
+        double nearD = 0, farD = 0;
         for (int r = 0; r < kSom; ++r) for (int c = 0; c + 1 < kSom; ++c)
         {
             auto d = [&] (int a, int b) { double s = 0; for (int j = 0; j < kZ; ++j) { double e = m.w[(size_t) a * kZ + j] - m.w[(size_t) b * kZ + j]; s += e * e; } return std::sqrt (s); };
-            near += d (r * kSom + c, r * kSom + c + 1); far += d (r * kSom + c, ((r + 8) % kSom) * kSom + (c + 7) % kSom);
+            nearD += d (r * kSom + c, r * kSom + c + 1); farD += d (r * kSom + c, ((r + 8) % kSom) * kSom + (c + 7) % kSom);
         }
-        CHECK (near < far * 0.3, "SOM keeps topology (neighbour distance %.3f vs far %.3f)", near, far);
+        CHECK (nearD < farD * 0.3, "SOM keeps topology (neighbour distance %.3f vs far %.3f)", nearD, farD);
     }
     {
         std::vector<std::string> w1, w2;
@@ -179,12 +190,19 @@ int main()
         {
             const size_t pi = pick() % m.ps.list.size(); Param* p = m.ps.list[pi]; const size_t i = pick() % p->size();
             size_t off = 0; for (size_t q = 0; q < pi; ++q) off += m.ps.list[q]->size();
-            const float a = g[off + i], w0 = p->w[i], h = 1e-3f;
-            p->w[i] = w0 + h; m.ps.zeroGrad(); const double lp = m.trainBatch (zs, cs, ts, B);
-            p->w[i] = w0 - h; m.ps.zeroGrad(); const double lm = m.trainBatch (zs, cs, ts, B); p->w[i] = w0;
-            const double num = (lp - lm) / (2 * h);
-            if (std::abs (num) + std::abs (a) < 1e-4) continue;
-            worst = std::max (worst, std::abs (num - a) / (std::abs (num) + std::abs (a)));
+            const float a = g[off + i], w0 = p->w[i];
+            double rel = 1e9, num = 0;    // three steps, as for the VAE
+            for (float h : { 1e-3f, 5e-4f, 2.5e-4f })
+            {
+                p->w[i] = w0 + h; m.ps.zeroGrad(); const double lp = m.trainBatch (zs, cs, ts, B);
+                p->w[i] = w0 - h; m.ps.zeroGrad(); const double lm = m.trainBatch (zs, cs, ts, B); p->w[i] = w0;
+                const double nh = (lp - lm) / (2 * h);
+                if (std::abs (nh) + std::abs (a) < 1e-4) { rel = 0; num = nh; break; }
+                const double r = std::abs (nh - a) / (std::abs (nh) + std::abs (a));
+                if (r < rel) { rel = r; num = nh; }
+            }
+            if (rel > 0.03) std::printf ("    spatial param %zu idx %zu: analytic %.6g numeric %.6g (rel %.3f)\n", pi, i, (double) a, num, rel);
+            worst = std::max (worst, rel);
         }
         CHECK (worst < 0.05, "spatial net (softplus-variance NLL) gradients match (worst rel err %.4f), %zu params", worst, m.ps.count());
         // learn: width = tanh(z0), balance = z1 (+ noise)

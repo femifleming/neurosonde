@@ -5,6 +5,7 @@
 #include "dsp/Synths.h"
 #include "dsp/Stereo.h"
 #include "dsp/Spatial.h"
+#include "dsp/Limiter.h"
 #include <mutex>
 
 namespace ns
@@ -24,6 +25,7 @@ struct Params
     float lucid = 0.7f, temperature = 0.5f, drift = 0.1f; int dreamEngine = 0;   // 0 gru, 1 reservoir, 2 both
     float gravity = 0.0f, probeX = 0.5f, probeY = 0.5f; bool route = false; float routeSpeed = 4.0f;  // stars / minute
     bool learn = true, listen = true; float gateDb = -58, inGainDb = 0;
+    float ceilingDb = -1.0f; int limiter = 0; bool autoGain = false; bool matchLevels = true;     // gain staging: Limiter::Mode
     float mix = 1.0f, outDb = 0, transpose = 0; int pitchSource = 0; bool keysOnly = false;    // pitch: 0 input, 1 network, 2 keys
     float attack = 0.02f, release = 0.6f, glide = 0.05f;
     float grainSize = 120, spray = 0.3f, focus = 6; int space = 0, playback = 2; float ringSize = 6, pitchFollow = 0.5f;
@@ -50,6 +52,10 @@ struct Telemetry
     float fieldAz = 0, fieldEl = 0, fieldDiffuse = 1;
     std::array<float, 256> scopeL {}, scopeR {};
     float weights[Synth::kLayers] {};
+    // gain staging (the gain page): peaks in dBFS since the last hop, loudness, the limiter's gain reduction
+    float gInPeak = -120, gInRms = -120, gLayerPeak[Synth::kLayers] { -120, -120, -120, -120 }, gWetPeak = -120,
+          gPreLimPeak = -120, gOutPeak = -120, gOutRms = -120, gReduction = 0, gAutoDb = 0, gCeilingDb = -1;
+    long gOvers = 0, gOutOvers = 0; int gLatency = 0; int gLimiter = 0;
     struct Hit { int unit; float strength; float loud; float f0; };
     std::array<Hit, 8> hits {}; int nHits = 0;
     int corpusUnits = 0; float routePos = 0;
@@ -151,6 +157,7 @@ public:
         std::fill (gruH, gruH + kGruH, 0.0f); esnS.assign (EchoState::N, 0.0f);
         std::fill (zPrev, zPrev + kZ, 0.0f); std::fill (driftV, driftV + kZ, 0.0f);
         stargate.sr = sr; hopCount = 0; presence = 0; held.reserve (128);
+        limiter.prepare (sr, ambi::kCh); meters.reset(); autoGainDb = 0; inPowSlow = wetPowSlow = 0;
         synth.setControl (ctl);
     }
 
@@ -190,6 +197,7 @@ public:
             if (L.mode != P.mode && P.on) { /* engines keep their state; nothing to reset */ }
             L.on = P.on; L.mode = std::clamp (P.mode, 0, (int) Mode::Count - 1); L.level = P.level; L.pan = P.pan; L.character = P.character;
         }
+        synth.matchLevels = params.matchLevels;
         applyEngineParams();
         if (Chunk* ch = nullptr; inbox.pop (ch) && ch)
         {
@@ -209,6 +217,11 @@ public:
             while (mi < midi.size() && midi[mi].sample < i + seg) handleMidi (midi[mi++]);
             const float* aL = anaL ? anaL : inL; const float* aR = anaR ? anaR : (anaL ? anaL : inR);
             for (int k = 0; k < seg; ++k) mono[(size_t) k] = 0.5f * (aL[i + k] + aR[i + k]) * inGain;
+            for (int k = 0; k < seg; ++k)
+            {
+                const float a = std::max (std::abs (aL[i + k]), std::abs (aR[i + k])) * inGain;
+                meters.inPeak = std::max (meters.inPeak, a); meters.inSq += mono[(size_t) k] * mono[(size_t) k];
+            }
             if (params.listen) corpus.write (mono.data(), seg);
             // a stereo image to learn from: two different channels (a bit-identical pair is a mono source duplicated)
             stereoIn = aL != aR && ! std::equal (aL + i, aL + i + seg, aR + i);
@@ -229,18 +242,25 @@ public:
             const float learnedW = params.learnedWidth * juce_clamp01 (spatPredNow[16] * 2.5f);
             stargate.process (wetL.data(), wetR.data(), seg, params.width * (1 + 0.5f * axis (TextEmbed::Wide)) * (1 + learnedW), params.spin);
             nebula.process (wetL.data(), wetR.data(), seg, std::clamp (params.nebula + 0.4f * std::max (0.0f, axis (TextEmbed::Wet)), 0.0f, 1.0f), params.decay);
-            const float og = dbToGain (params.outDb), mx = params.mix;
-            double e = 0;
+            // ---- gain staging: auto gain, output gain, the mix, then the limiter at the ceiling
+            autoGainStep (inL + i, inR + i, wetL.data(), wetR.data(), seg);
+            const float og = dbToGain (params.outDb + autoGainDb), mx = params.mix;
             for (int k = 0; k < seg; ++k)
             {
                 float l = wetL[(size_t) k] * og, r = wetR[(size_t) k] * og;
                 dcL += 0.0005f * (l - dcL); dcR += 0.0005f * (r - dcR); l -= dcL; r -= dcR;
-                l = std::tanh (l * 0.9f) / 0.9f; r = std::tanh (r * 0.9f) / 0.9f;
                 if (! std::isfinite (l)) l = 0; if (! std::isfinite (r)) r = 0;
-                outL[i + k] = inL[i + k] * (1 - mx) + l * mx;
-                outR[i + k] = inR[i + k] * (1 - mx) + r * mx;
-                e += l * l + r * r;
+                meters.wetPeak = std::max (meters.wetPeak, std::max (std::abs (l), std::abs (r)));
+                const float dl = inL[i + k], dr = inR[i + k];
+                outL[i + k] = dl * (1 - mx) + l * mx;
+                outR[i + k] = dr * (1 - mx) + r * mx;
+                meters.preLimPeak = std::max (meters.preLimPeak, std::max (std::abs (outL[i + k]), std::abs (outR[i + k])));
             }
+            float* chans[2] = { outL + i, outR + i };
+            limiter.process (chans, 2, seg, dbToGain (params.ceilingDb), params.limiter);
+            double e = 0;
+            for (int k = 0; k < seg; ++k) e += outL[i + k] * outL[i + k] + outR[i + k] * outR[i + k];
+            meters.outSq += (float) e * 0.5f; meters.n += seg;
             outLoud = 0.9f * outLoud + 0.1f * (float) (10 * std::log10 (e / (2 * seg) + 1e-12));
             i += seg;
         }
@@ -306,8 +326,13 @@ private:
         placeSources ((float) seg / sr);
         float* Ls[4]; float* Rs[4]; for (int k = 0; k < 4; ++k) { Ls[k] = layL[(size_t) k].data(); Rs[k] = layR[(size_t) k].data(); }
         synth.renderLayers (Ls, Rs, seg, (Combine) std::clamp (params.combine, 0, 3), morphNow);
-        const float og = dbToGain (params.outDb) * params.mix;
+        {   // auto gain from the sum of the layers (what the stereo build calls the wet signal)
+            for (int s2 = 0; s2 < seg; ++s2) { float a = 0, b = 0; for (int k = 0; k < 4; ++k) { a += Ls[k][s2]; b += Rs[k][s2]; } wetL[(size_t) s2] = a; wetR[(size_t) s2] = b; }
+            autoGainStep (inL, inR, wetL.data(), wetR.data(), seg);
+        }
+        const float og = dbToGain (params.outDb + autoGainDb) * params.mix;
         for (int k = 0; k < 4; ++k) for (int s2 = 0; s2 < seg; ++s2) { Ls[k][s2] *= og; Rs[k][s2] *= og; if (params.keysOnly) { const float g = gate.next(); Ls[k][s2] *= g; Rs[k][s2] *= g; } }
+        for (int k = 0; k < 4; ++k) for (int s2 = 0; s2 < seg; ++s2) meters.wetPeak = std::max (meters.wetPeak, std::max (std::abs (Ls[k][s2]), std::abs (Rs[k][s2])));
         for (int s2 = 0; s2 < seg; ++s2) { dryL[(size_t) s2] = inL[s2] * (1 - params.mix); dryR[(size_t) s2] = inR[s2] * (1 - params.mix); }
         std::array<const float*, SpatialScene::kSources> l {}, r {};
         for (int k = 0; k < 4; ++k) { const bool live = synth.layerLive (k) || (k == 0 && (params.combine >= 2)); l[(size_t) k] = live ? Ls[k] : nullptr; r[(size_t) k] = live ? Rs[k] : nullptr; }
@@ -315,11 +340,47 @@ private:
         float* outs[ambi::kCh]; const int nOut = std::min (spatialN, ambi::kCh);
         for (int c = 0; c < nOut; ++c) outs[c] = spatialOut[c] + offset;
         scene.process (l, r, srcCtl, outs, nOut, seg);
-        // safety: soft-limit every output channel
-        for (int c = 0; c < nOut; ++c) for (int s2 = 0; s2 < seg; ++s2) { float& x = outs[c][s2]; x = std::isfinite (x) ? std::tanh (x * 0.9f) / 0.9f : 0.0f; }
+        // every output channel through the linked limiter at the ceiling
+        for (int c = 0; c < nOut; ++c) for (int s2 = 0; s2 < seg; ++s2) { float& x = outs[c][s2]; if (! std::isfinite (x)) x = 0; meters.preLimPeak = std::max (meters.preLimPeak, std::abs (x)); }
+        limiter.process (outs, nOut, seg, dbToGain (params.ceilingDb), params.limiter);
         double e = 0; for (int c = 0; c < std::min (2, nOut); ++c) for (int s2 = 0; s2 < seg; ++s2) e += outs[c][s2] * outs[c][s2];
+        meters.outSq += (float) e * 0.5f; meters.n += seg;
         outLoud = 0.9f * outLoud + 0.1f * (float) (10 * std::log10 (e / (2 * seg) + 1e-12));
     }
+
+    /** auto gain: over a few seconds, bring the synthesis to the input's loudness (held while the input is silent) */
+    void autoGainStep (const float* inL, const float* inR, const float* wL, const float* wR, int seg)
+    {
+        if (! params.autoGain) { autoGainDb = 0; return; }
+        double pi = 0, pw = 0;
+        for (int k = 0; k < seg; ++k) { pi += 0.5 * (inL[k] * inL[k] + inR[k] * inR[k]); pw += 0.5 * (wL[k] * wL[k] + wR[k] * wR[k]); }
+        const float a = 1 - std::exp (-(float) seg / (3.0f * sr));
+        inPowSlow += a * ((float) (pi / seg) - inPowSlow); wetPowSlow += a * ((float) (pw / seg) - wetPowSlow);
+        if (inPowSlow > 1e-5f && wetPowSlow > 1e-9f)      // input above about -50 dBFS
+        {
+            const float target = std::clamp (10.0f * std::log10 (inPowSlow / wetPowSlow), -24.0f, 24.0f);
+            autoGainDb += (target - autoGainDb) * std::min (1.0f, (float) seg / (2.0f * sr));
+        }
+    }
+    static float toDb (float x) { return x > 1e-6f ? 20.0f * std::log10 (x) : -120.0f; }
+    /** the meters since the last hop into the telemetry (called under telLock) */
+    void publishMeters()
+    {
+        tel.gInPeak = toDb (meters.inPeak); tel.gWetPeak = toDb (meters.wetPeak); tel.gPreLimPeak = toDb (meters.preLimPeak);
+        tel.gOutPeak = toDb (limiter.outPeak); tel.gReduction = std::max (0.0f, -toDb (std::min (1.0f, limiter.minGain)));
+        tel.gInRms = meters.n > 0 || meters.inSq > 0 ? toDb (std::sqrt (meters.inSq / std::max (1L, meters.n))) : -120;
+        tel.gOutRms = meters.n > 0 ? toDb (std::sqrt (meters.outSq / std::max (1L, meters.n))) : -120;
+        for (int k = 0; k < Synth::kLayers; ++k) tel.gLayerPeak[k] = synth.layerLive (k) ? toDb (synth.layerPeak[k]) : -120;
+        tel.gOvers += limiter.overs; tel.gOutOvers += limiter.outOvers;
+        tel.gAutoDb = autoGainDb; tel.gCeilingDb = params.ceilingDb; tel.gLatency = limiter.latency(); tel.gLimiter = params.limiter;
+        meters.reset(); limiter.inPeak = limiter.outPeak = 0; limiter.minGain = 1; limiter.overs = limiter.outOvers = 0;
+    }
+public:
+    /** the output limiter's delay (the host is told) */
+    int latencySamples() const { return limiter.latency(); }
+    /** the overs counters back to zero (the gain page's reset) */
+    void resetOvers() { std::lock_guard<std::mutex> l (telLock); tel.gOvers = tel.gOutOvers = 0; }
+private:
 
     void applyEngineParams()
     {
@@ -509,6 +570,7 @@ private:
             tel.pitchFrom = labPitchFrom; tel.netSteps = labSteps;
             std::copy (c.mel, c.mel + kMel, tel.mel); std::copy (raw.mel, raw.mel + kMel, tel.melIn); std::copy (c.chroma, c.chroma + kChroma, tel.chroma);
             std::copy (synth.lastW, synth.lastW + Synth::kLayers, tel.weights);
+            publishMeters();
             // probe results: the nearest remembered moments ("signals") to where we are
             tel.nHits = 0;
             std::array<std::pair<float, int>, 8> best; int nb = 0;
@@ -541,6 +603,7 @@ private:
     std::shared_ptr<Brain> brain; std::shared_ptr<Brain::Ring> ring;
     float sr = 48000; int sinceHop = 0; uint64_t hopCount = 0, lastUnitHop = 0;
     Analyser analyser; Corpus corpus; Synth synth; Stargate stargate; Nebula nebula;
+    Limiter limiter; GainMeters meters; float autoGainDb = 0, inPowSlow = 0, wetPowSlow = 0;
     std::vector<float> wetL, wetR, mono; std::array<float, 2048> carrierWin {};
     std::array<float, kCond> cond {}, pendingCond {}; std::atomic<bool> notesChanged { false }; std::mutex notesLock; std::vector<std::string> noteWords;
     std::vector<int> route, pendingRoute; std::atomic<bool> routeChanged { false }; std::mutex routeLock; float routePos = 0;

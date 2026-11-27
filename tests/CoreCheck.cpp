@@ -1,4 +1,5 @@
 #include "../Source/Core.h"
+#include "TestDir.h"
 #include <cstdio>
 #include <chrono>
 using namespace ns;
@@ -6,8 +7,7 @@ static int fails = 0;
 #define CHECK(c, ...) do { std::printf ((c) ? "  ok   " : "  FAIL "); std::printf (__VA_ARGS__); std::printf ("\n"); if (! (c)) ++fails; } while (0)
 int main()
 {
-    std::system ("rm -rf /private/tmp/ns_core_test");
-    auto brain = std::make_shared<Brain> ("/private/tmp/ns_core_test");
+    auto brain = std::make_shared<Brain> (testDir ("ns_core_test"));
     brain->settings.intensive = true;
     Instance inst (brain);
     const int B = 256; const double sr = 48000;
@@ -62,8 +62,7 @@ int main()
     }
     // ---- spatial: two timbres, each with its own stereo image; the spatial network should learn which goes with which
     {
-        std::system ("rm -rf /private/tmp/ns_spat_test");
-        auto b2 = std::make_shared<Brain> ("/private/tmp/ns_spat_test"); b2->settings.intensive = true;
+        auto b2 = std::make_shared<Brain> (testDir ("ns_spat_test")); b2->settings.intensive = true;
         Instance s2 (b2); s2.prepare (sr, B); s2.params.layer[0] = { true, 0, 1, 0, 0.3f };
         std::mt19937 rng (4); std::normal_distribution<float> nd;
         int64_t p2 = 0;

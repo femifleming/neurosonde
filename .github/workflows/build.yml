@@ -1,0 +1,95 @@
+name: build
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS
+            os: macos-latest
+            package: Neurosonde-macOS.zip
+          - name: Windows
+            os: windows-latest
+            package: Neurosonde-Windows.zip
+          - name: Linux
+            os: ubuntu-22.04
+            package: Neurosonde-Linux.tar.gz
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libjack-jackd2-dev libfreetype-dev libfontconfig1-dev \
+            libx11-dev libxcomposite-dev libxcursor-dev libxext-dev libxinerama-dev libxrandr-dev libxrender-dev libxi-dev libegl-dev \
+            libgl1-mesa-dev libglu1-mesa-dev mesa-common-dev ninja-build xvfb fonts-dejavu-core
+
+      - name: Configure
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            brew list ninja >/dev/null 2>&1 || brew install ninja
+            cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release "-DCMAKE_OSX_ARCHITECTURES=arm64;x86_64"
+          elif [ "$RUNNER_OS" = "Linux" ]; then
+            cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          else
+            cmake -B build -A x64
+          fi
+
+      - name: Build
+        run: cmake --build build --config Release --parallel 4 --target Neurosonde_All NeurosondeSpace_All NeuroTest NeuroSpaceTest AnalysisCheck BrainCheck CoreCheck GradCheck OfflineCheck SpatialCheck StereoCheck FFTCheck GemmCheck EngineCheck
+
+      - name: Component checks
+        working-directory: build
+        run: ctest -C Release --output-on-failure --timeout 1800
+
+      - name: Plug-in checks
+        shell: bash
+        run: |
+          find_exe() { find build -type f \( -name "$1" -o -name "$1.exe" \) -path "*_artefacts*" | head -n 1; }
+          RUN=""
+          if [ "$RUNNER_OS" = "Linux" ]; then RUN="xvfb-run -a"; fi
+          for t in NeuroTest NeuroSpaceTest; do
+            exe="$(find_exe $t)"; echo "== $t ($exe)"
+            $RUN "$exe" --shots "build/shots-$t"
+          done
+
+      - name: Package
+        shell: bash
+        run: ci/package.sh "${{ matrix.name }}" build
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.package }}
+          path: dist/${{ matrix.package }}
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: packages
+          merge-multiple: true
+      - name: Checksums
+        run: cd packages && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: packages/*
+          generate_release_notes: true
